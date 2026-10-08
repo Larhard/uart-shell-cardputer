@@ -1,0 +1,27 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# IDEs
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.code-workspace
+
+# Build artifacts / Python
+*.bin
+*.elf
+*.map
+__pycache__/
+*.pyc
+get-platformio.py
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+*.swp
+*~
