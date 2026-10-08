@@ -114,22 +114,33 @@ You can also open the folder in VS Code with the PlatformIO extension and use th
 
 If an upload doesn't start, hold `G0` (the BtnA key) while plugging in USB. This puts the board in download mode.
 
-### Build outputs
+### Creating the dist package
 
-Files are written to `.pio/build/cardputer-adv/`:
+Every `pio run` creates the package automatically. A post-build step ([tools/merge_bin.py](tools/merge_bin.py)) copies the release files into `dist/`, and takes the version number from `APP_VERSION` in [src/main.cpp](src/main.cpp):
 
 | File | Use |
 |------|-----|
-| `firmware.bin` | App image. Install it with Launcher (copy it to the SD card, or use OTA/WebUI) or flash it at `0x10000` |
-| `uart_shell_merged.bin` | Full image (bootloader, partition table and app). Flash it at `0x0` with esptool or a web flasher |
+| `dist/UART_Shell_v<ver>_CardputerADV.bin` | App image for Launcher. Copy it to the SD card and install it (see below), or flash it at `0x10000` |
+| `dist/UART_Shell_v<ver>_CardputerADV_merged.bin` | Full image (bootloader, partition table and app). Flash it at `0x0` with esptool or a web flasher |
+
+To make a release:
+
+1. Change `#define APP_VERSION` in `src/main.cpp`.
+2. Run `pio run`. The build log ends with a `dist: ...` line listing the files it created.
+3. Optional: check the image with `esptool.py --chip esp32s3 image_info dist/UART_Shell_v<ver>_CardputerADV.bin`. The checksum and validation hash should both say `valid`.
+4. Attach the two files to a GitHub release. `dist/` isn't tracked by git because `*.bin` is ignored.
+
+To flash the merged image over USB:
 
 ```bash
-esptool.py --chip esp32s3 write_flash 0x0 .pio/build/cardputer-adv/uart_shell_merged.bin
+esptool.py --chip esp32s3 write_flash 0x0 dist/UART_Shell_v1.0_CardputerADV_merged.bin
 ```
+
+The same files also stay in `.pio/build/cardputer-adv/` as `firmware.bin` and `uart_shell_merged.bin`.
 
 ## Using it with Launcher
 
-Copy `firmware.bin` to the SD card (for example as `UART_Shell.bin`) and install it from Launcher's SD menu. The app doesn't use SPIFFS or FAT partitions, so Launcher only installs the 420 KB app image. Settings are stored in NVS under the `uartshell` namespace, so they survive reinstalls and switching between apps. To get back to Launcher, reset the device or use *Reboot* in the settings menu.
+Copy `dist/UART_Shell_v<ver>_CardputerADV.bin` to the SD card (any folder). On the Cardputer, open Launcher, choose **SD**, select the file and then **Install**. The app doesn't use SPIFFS or FAT partitions, so Launcher only installs the 420 KB app image. Settings are stored in NVS under the `uartshell` namespace, so they survive reinstalls and switching between apps. To get back to Launcher, reset the device or use *Reboot* in the settings menu.
 
 ## Project layout
 
@@ -141,7 +152,7 @@ src/display.h      fixed ST7789 panel config (LovyanGFX)
 src/sdlog.*        buffered SD session logger
 src/settings.*     settings stored in NVS
 partitions.csv     8 MB layout with two OTA app slots and no data partitions
-tools/merge_bin.py post-build step that creates the merged image
+tools/merge_bin.py post-build step that creates the merged image and dist/ package
 ```
 
 ## Limitations
