@@ -209,8 +209,11 @@ static uint8_t echoQ[256];
 static uint8_t eqHead = 0, eqTail = 0;
 static uint32_t echoDeadline = 0;
 
+enum EchoMode : uint8_t { ECHO_OFF, ECHO_HIDE, ECHO_SHOW, ECHO_COUNT };
+static const char *ECHO_NAMES[] = {"Off", "On, hide echo", "On, show all"};
+
 static bool echoSwallow(uint8_t b) {
-  if (!cfg.localEcho || eqHead == eqTail) return false;
+  if (cfg.localEcho != ECHO_HIDE || eqHead == eqTail) return false;
   if ((int32_t)(millis() - echoDeadline) > 0) {
     eqTail = eqHead;
     return false;
@@ -298,7 +301,8 @@ static void send(const char *s, size_t n, bool expectEcho) {
   uart.write((const uint8_t *)s, n);
   lastTxMs = millis();
   jumpToEnd();
-  if (!expectEcho || !cfg.localEcho) return;
+  if (!expectEcho || cfg.localEcho != ECHO_HIDE) return;
+  if ((int32_t)(millis() - echoDeadline) > 0) eqTail = eqHead;  // drop bytes that never came back
   for (size_t i = 0; i < n; i++) {
     uint8_t c = s[i];
     if ((c >= 0x20 && c < 0x7F) || c == '\r' || c == '\n') {
@@ -505,7 +509,7 @@ static void menuValue(int item, char *out, size_t sz) {
     case MI_PINS: snprintf(out, sz, cfg.swapPins ? "RX=G2 TX=G1" : "RX=G1 TX=G2"); break;
     case MI_INPUT: snprintf(out, sz, cfg.rawMode ? "Raw keys" : "Line"); break;
     case MI_EOL: snprintf(out, sz, "%s", EOL_NAMES[cfg.eol]); break;
-    case MI_ECHO: snprintf(out, sz, cfg.localEcho ? "On" : "Off"); break;
+    case MI_ECHO: snprintf(out, sz, "%s", ECHO_NAMES[cfg.localEcho % ECHO_COUNT]); break;
     case MI_LOG:
       if (sdlog::active()) snprintf(out, sz, "%s", sdlog::fileName());
       else snprintf(out, sz, cfg.logEnabled ? "No SD card" : "Off");
@@ -582,7 +586,7 @@ static void changeItem(int item, int dir) {
     case MI_PINS: cfg.swapPins ^= 1; uartBegin(); logConfigNote(); break;
     case MI_INPUT: cfg.rawMode ^= 1; rawLen = 0; break;
     case MI_EOL: cfg.eol = (cfg.eol + dir + EOL_COUNT) % EOL_COUNT; break;
-    case MI_ECHO: cfg.localEcho ^= 1; eqTail = eqHead; break;
+    case MI_ECHO: cfg.localEcho = (cfg.localEcho + dir + ECHO_COUNT) % ECHO_COUNT; eqTail = eqHead; break;
     case MI_LOG:
       if (sdlog::active() || cfg.logEnabled) {
         sdlog::stop();

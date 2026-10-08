@@ -10,7 +10,7 @@ struct Settings {
   uint8_t swapPins = 0;   // 0: RX=G1 TX=G2, 1: RX=G2 TX=G1
   uint8_t rawMode = 0;    // 0: line mode, 1: raw keystrokes
   uint8_t eol = EOL_CR;
-  uint8_t localEcho = 1;
+  uint8_t localEcho = 1;  // EchoMode: 0 off, 1 on + hide remote echo, 2 on + show all
   uint8_t logEnabled = 0;
   uint8_t logTimestamps = 1;
   uint8_t brightness = 160;

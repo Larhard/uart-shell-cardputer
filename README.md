@@ -37,7 +37,7 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 | `Fn+S` | Swap the RX/TX pins |
 | `Fn+R` | Switch between line mode and raw mode |
 | `Fn+N` | Cycle what Enter sends: CR, LF, CRLF or nothing |
-| `Fn+E` | Turn local echo on or off |
+| `Fn+E` | Cycle local echo: hide echo, show all, off |
 | `Fn+L` | Turn SD logging on or off (starts a new file) |
 | `Fn+C` | Clear the screen and scrollback |
 | `Fn+-` / `Fn+=` | Brightness down / up |
@@ -61,7 +61,15 @@ Detection only runs when you press `Fn+B`. It cycles through the common rates, f
 
 ## Local echo
 
-With local echo on, what you type appears in the TX color. Many devices (Linux consoles, U-Boot, most shells) echo your input back. The terminal recognizes that echo and hides it, so you don't see every line twice, and it works the same way with devices that don't echo. If you want to see exactly what the device sends back, turn local echo off.
+`Fn+E` or the settings menu cycles through three modes:
+
+| Mode | What you see |
+|------|--------------|
+| **On, hide echo** (default) | What you type appears in the TX color. Many devices (Linux consoles, U-Boot, most shells) echo your input back. Those bytes are recognized and hidden, so lines don't show up twice. Devices that don't echo work the same way. |
+| **On, show all** | What you type appears in the TX color, and everything received is shown in the RX color, including the echo. Use this for loopback tests (TX wired to RX). |
+| **Off** | Nothing you type is shown locally. You only see what the device sends back. |
+
+In *hide echo* mode, a TX-RX loopback looks like nothing was received, because the looped-back bytes are exactly the echo being hidden.
 
 ## SD logging
 
