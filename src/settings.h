@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 enum Eol : uint8_t { EOL_CR, EOL_LF, EOL_CRLF, EOL_NONE, EOL_COUNT };
+enum Port : uint8_t { PORT_GROVE, PORT_USB };
 
 struct Settings {
   uint32_t baud = 115200;
@@ -15,6 +16,10 @@ struct Settings {
   uint8_t logTimestamps = 1;
   uint8_t brightness = 160;
   uint16_t logCounter = 0;
+  // Newer fields go at the end: an older saved blob loads as a prefix.
+  uint8_t port = PORT_GROVE;
+  uint8_t dtr = 0;  // USB adapters only
+  uint8_t rts = 0;
 };
 
 extern Settings cfg;

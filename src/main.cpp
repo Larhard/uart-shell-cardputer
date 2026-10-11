@@ -6,8 +6,9 @@
 #include "sdlog.h"
 #include "settings.h"
 #include "term.h"
+#include "usbserial.h"
 
-#define APP_VERSION "1.0"
+#define APP_VERSION "1.1"
 
 using kbd::Key;
 
@@ -42,10 +43,11 @@ static LGFX_Sprite bar(&lcd);
 constexpr int PIN_G1 = 1, PIN_G2 = 2;
 static HardwareSerial &uart = Serial1;
 
-struct Frame { uint32_t cfg; const char *name; };
+// bits/parity/stop are used for USB adapters (parity: 0 none, 1 odd, 2 even).
+struct Frame { uint32_t cfg; const char *name; uint8_t bits, parity, stop; };
 static const Frame FRAMES[] = {
-  {SERIAL_8N1, "8N1"}, {SERIAL_8E1, "8E1"}, {SERIAL_8O1, "8O1"},
-  {SERIAL_8N2, "8N2"}, {SERIAL_7E1, "7E1"}, {SERIAL_7O1, "7O1"},
+  {SERIAL_8N1, "8N1", 8, 0, 1}, {SERIAL_8E1, "8E1", 8, 2, 1}, {SERIAL_8O1, "8O1", 8, 1, 1},
+  {SERIAL_8N2, "8N2", 8, 0, 2}, {SERIAL_7E1, "7E1", 7, 2, 1}, {SERIAL_7O1, "7O1", 7, 1, 1},
 };
 constexpr int FRAME_COUNT = sizeof(FRAMES) / sizeof(FRAMES[0]);
 
@@ -65,17 +67,54 @@ static const char *EOL_BYTES[] = {"\r", "\n", "\r\n", ""};
 
 static uint32_t lastRxMs = 0, lastTxMs = 0;
 
-static void uartBegin() {
+// The serial link is either the Grove UART or a USB-serial adapter on the USB-C port.
+static bool usbPort() { return cfg.port == PORT_USB; }
+
+static void linkBegin() {
+  const Frame &f = FRAMES[cfg.frame];
   uart.end();
-  uart.setRxBufferSize(16384);
-  uart.begin(cfg.baud, FRAMES[cfg.frame].cfg, cfg.swapPins ? PIN_G2 : PIN_G1,
-             cfg.swapPins ? PIN_G1 : PIN_G2);
+  if (usbPort()) {
+    usbserial::begin();
+    usbserial::setLine(cfg.baud, f.bits, f.parity, f.stop);
+    usbserial::setLines(cfg.dtr, cfg.rts);
+  } else {
+    uart.setRxBufferSize(16384);
+    uart.begin(cfg.baud, f.cfg, cfg.swapPins ? PIN_G2 : PIN_G1, cfg.swapPins ? PIN_G1 : PIN_G2);
+  }
+}
+
+static void linkSetBaud(uint32_t b) {
+  if (usbPort()) usbserial::setBaud(b);
+  else uart.updateBaudRate(b);
+}
+
+static size_t linkRead(uint8_t *buf, size_t n) {
+  if (usbPort()) return usbserial::read(buf, n);
+  int avail = uart.available();
+  if (avail <= 0) return 0;
+  return uart.read(buf, (size_t)avail < n ? (size_t)avail : n);
+}
+
+static void linkWrite(const uint8_t *buf, size_t n) {
+  if (usbPort()) usbserial::write(buf, n);
+  else uart.write(buf, n);
+}
+
+static void linkFlushInput() {
+  if (usbPort()) usbserial::flushInput();
+  else
+    while (uart.available()) uart.read();
+}
+
+static void portDesc(char *out, size_t sz) {
+  if (usbPort()) snprintf(out, sz, "USB %s", usbserial::connected() ? usbserial::name() : "(none)");
+  else snprintf(out, sz, "RX=G%d TX=G%d", cfg.swapPins ? 2 : 1, cfg.swapPins ? 1 : 2);
 }
 
 static void logConfigNote() {
-  char s[64];
-  snprintf(s, sizeof s, "%lu %s RX=G%d TX=G%d", (unsigned long)cfg.baud, FRAMES[cfg.frame].name,
-           cfg.swapPins ? 2 : 1, cfg.swapPins ? 1 : 2);
+  char s[64], port[24];
+  portDesc(port, sizeof port);
+  snprintf(s, sizeof s, "%lu %s %s", (unsigned long)cfg.baud, FRAMES[cfg.frame].name, port);
   sdlog::note(s);
 }
 
@@ -130,8 +169,8 @@ struct {
 
 static void scanSet(int idx) {
   scan.idx = idx;
-  uart.updateBaudRate(SCAN_BAUDS[idx]);
-  while (uart.available()) uart.read();
+  linkSetBaud(SCAN_BAUDS[idx]);
+  linkFlushInput();
   scan.winStart = millis();
   scan.n = scan.good = 0;
 }
@@ -151,7 +190,7 @@ static void scanStart() {
 static void scanFinish(uint32_t baud, bool found) {
   scan.on = false;
   cfg.baud = baud;
-  uart.updateBaudRate(baud);
+  linkSetBaud(baud);
   if (found) {
     cfg.autoBaud = 1;
     settingsSave();
@@ -271,10 +310,8 @@ static void rxByte(uint8_t b) {
 
 static void pumpUart() {
   uint8_t buf[256];
-  int avail;
-  while ((avail = uart.available()) > 0) {
-    size_t n = uart.read(buf, avail > (int)sizeof buf ? sizeof buf : avail);
-    if (!n) break;
+  size_t n;
+  while ((n = linkRead(buf, sizeof buf)) > 0) {
     lastRxMs = millis();
     for (size_t i = 0; i < n; i++) {
       if (scan.on) scanByte(buf[i]);
@@ -298,7 +335,7 @@ static int histPos = -1;
 
 static void send(const char *s, size_t n, bool expectEcho) {
   if (!n) return;
-  uart.write((const uint8_t *)s, n);
+  linkWrite((const uint8_t *)s, n);
   lastTxMs = millis();
   jumpToEnd();
   if (!expectEcho || cfg.localEcho != ECHO_HIDE) return;
@@ -461,7 +498,11 @@ static void drawStatus(bool force) {
   if (!follow) snprintf(scroll, sizeof scroll, "^%lu", (unsigned long)(term::last() - viewBottom));
 
   char sig[80];
-  snprintf(sig, sizeof sig, "%s|%s|%d|%d|%d|%s|%s|%d%d", baud, FRAMES[cfg.frame].name, cfg.swapPins,
+  char port[12];
+  if (usbPort()) snprintf(port, sizeof port, "U:%s", usbserial::connected() ? usbserial::name() : "--");
+  else snprintf(port, sizeof port, "RX:G%d", cfg.swapPins ? 2 : 1);
+  const char *lines = !usbPort() ? "" : cfg.dtr && cfg.rts ? "DR" : cfg.dtr ? "D" : cfg.rts ? "R" : "";
+  snprintf(sig, sizeof sig, "%s|%s|%s|%s|%d|%d|%s|%s|%d%d", baud, FRAMES[cfg.frame].name, port, lines,
            cfg.rawMode, cfg.eol, logTxt, scroll, rxOn, txOn);
   if (!force && strcmp(sig, lastStatus) == 0) return;
   strcpy(lastStatus, sig);
@@ -476,7 +517,8 @@ static void drawStatus(bool force) {
   };
   seg(baud, scan.on ? C_TX : C_TEXT);
   seg(FRAMES[cfg.frame].name, C_DIM);
-  seg(cfg.swapPins ? "RX:G2" : "RX:G1", C_DIM);
+  seg(port, usbPort() && !usbserial::connected() ? C_RED : C_DIM);
+  seg(lines, C_TX);
   seg(cfg.rawMode ? "RAW" : "LINE", C_INFO);
   seg(EOL_NAMES[cfg.eol], C_DIM);
   seg(logTxt, C_RED);
@@ -489,12 +531,14 @@ static void drawStatus(bool force) {
 // ---------------------------------------------------------------------------
 // Settings menu
 // ---------------------------------------------------------------------------
-enum MenuItem { MI_BAUD, MI_FRAME, MI_PINS, MI_INPUT, MI_EOL, MI_ECHO, MI_LOG, MI_TS, MI_BRIGHT,
-                MI_CLEAR, MI_REBOOT, MI_COUNT };
-static const char *MENU_LABELS[] = {"Baud rate", "Data/parity/stop", "Pins", "Input mode",
-                                    "Enter sends", "Local echo", "SD logging", "Log timestamps",
-                                    "Brightness", "Clear screen", "Reboot (Launcher)"};
-static int menuSel = 0;
+enum MenuItem { MI_PORT, MI_BAUD, MI_FRAME, MI_PINS, MI_LINES, MI_INPUT, MI_EOL, MI_ECHO, MI_LOG,
+                MI_TS, MI_BRIGHT, MI_CLEAR, MI_REBOOT, MI_COUNT };
+static const char *MENU_LABELS[] = {"Port", "Baud rate", "Data/parity/stop", "Grove pins",
+                                    "USB DTR / RTS", "Input mode", "Enter sends", "Local echo",
+                                    "SD logging", "Log timestamps", "Brightness", "Clear screen",
+                                    "Reboot (Launcher)"};
+constexpr int MENU_ROWS = 11;
+static int menuSel = 0, menuTop = 0;
 static char baudEdit[9];
 static uint8_t baudEditLen = 0;
 
@@ -505,6 +549,11 @@ static void menuValue(int item, char *out, size_t sz) {
       else if (cfg.autoBaud) snprintf(out, sz, scan.on ? "Auto (scanning)" : "Auto %lu (Fn+B)", (unsigned long)cfg.baud);
       else snprintf(out, sz, "%lu", (unsigned long)cfg.baud);
       break;
+    case MI_PORT:
+      if (usbPort()) portDesc(out, sz);
+      else snprintf(out, sz, "Grove");
+      break;
+    case MI_LINES: snprintf(out, sz, "DTR %s RTS %s", cfg.dtr ? "on" : "off", cfg.rts ? "on" : "off"); break;
     case MI_FRAME: snprintf(out, sz, "%s", FRAMES[cfg.frame].name); break;
     case MI_PINS: snprintf(out, sz, cfg.swapPins ? "RX=G2 TX=G1" : "RX=G1 TX=G2"); break;
     case MI_INPUT: snprintf(out, sz, cfg.rawMode ? "Raw keys" : "Line"); break;
@@ -526,8 +575,10 @@ static void drawMenu() {
   lcd.fillRect(0, 0, W, STATUS_H, C_BAR);
   lcd.setTextColor(C_TEXT);
   lcd.drawString("UART Shell " APP_VERSION " - settings", 2, 1);
-  for (int i = 0; i < MI_COUNT; i++) {
-    int y = 12 + i * 10;
+  if (menuSel < menuTop) menuTop = menuSel;
+  if (menuSel >= menuTop + MENU_ROWS) menuTop = menuSel - MENU_ROWS + 1;
+  for (int i = menuTop; i < MI_COUNT && i < menuTop + MENU_ROWS; i++) {
+    int y = 12 + (i - menuTop) * 10;
     bool sel = i == menuSel;
     if (sel) lcd.fillRect(0, y - 1, W, 10, C_SEL);
     lcd.setTextColor(sel ? C_TEXT : C_DIM);
@@ -543,10 +594,10 @@ static void drawMenu() {
 }
 
 static void startLog() {
-  char hdr[80];
-  snprintf(hdr, sizeof hdr, "UART Shell %s log, %lu %s RX=G%d TX=G%d", APP_VERSION,
-           (unsigned long)cfg.baud, FRAMES[cfg.frame].name, cfg.swapPins ? 2 : 1,
-           cfg.swapPins ? 1 : 2);
+  char hdr[96], port[24];
+  portDesc(port, sizeof port);
+  snprintf(hdr, sizeof hdr, "UART Shell %s log, %lu %s %s", APP_VERSION, (unsigned long)cfg.baud,
+           FRAMES[cfg.frame].name, port);
   if (sdlog::start(hdr)) {
     settingsSave();  // persists the log counter
     info("[log] %s", sdlog::fileName());
@@ -559,7 +610,7 @@ static void setManualBaud(uint32_t b) {
   if (scan.on) scan.on = false;
   cfg.autoBaud = 0;
   cfg.baud = b;
-  uart.updateBaudRate(b);
+  linkSetBaud(b);
   logConfigNote();
 }
 
@@ -582,8 +633,20 @@ static void changeItem(int item, int dir) {
       }
       break;
     }
-    case MI_FRAME: cfg.frame = (cfg.frame + dir + FRAME_COUNT) % FRAME_COUNT; uartBegin(); logConfigNote(); break;
-    case MI_PINS: cfg.swapPins ^= 1; uartBegin(); logConfigNote(); break;
+    case MI_PORT: cfg.port = usbPort() ? PORT_GROVE : PORT_USB; linkBegin(); logConfigNote(); break;
+    case MI_FRAME: cfg.frame = (cfg.frame + dir + FRAME_COUNT) % FRAME_COUNT; linkBegin(); logConfigNote(); break;
+    case MI_PINS:
+      cfg.swapPins ^= 1;
+      if (!usbPort()) linkBegin();
+      logConfigNote();
+      break;
+    case MI_LINES: {
+      uint8_t v = ((cfg.rts << 1 | cfg.dtr) + dir + 4) % 4;  // off, DTR, RTS, both
+      cfg.dtr = v & 1;
+      cfg.rts = v >> 1;
+      usbserial::setLines(cfg.dtr, cfg.rts);
+      break;
+    }
     case MI_INPUT: cfg.rawMode ^= 1; rawLen = 0; break;
     case MI_EOL: cfg.eol = (cfg.eol + dir + EOL_COUNT) % EOL_COUNT; break;
     case MI_ECHO: cfg.localEcho = (cfg.localEcho + dir + ECHO_COUNT) % ECHO_COUNT; eqTail = eqHead; break;
@@ -628,6 +691,7 @@ static void quickBaud(int dir) {
 static void showHelp() {
   info("Opt settings  Fn+B detect baud");
   info("Fn+[ ] baud -/+  Fn+F frame  Fn+S swap");
+  info("Fn+U Grove/USB  Fn+D DTR  Fn+T RTS");
   info("Fn+R raw/line  Fn+N enter  Fn+E echo");
   info("Fn+L SD log  Fn+C clear  Fn+- = bright");
   info("Fn+; . line  Fn+, / page  Fn+Ent end");
@@ -650,6 +714,16 @@ static bool shortcut(uint8_t base) {
     case 'n': item = MI_EOL; break;
     case 'e': item = MI_ECHO; break;
     case 'l': item = MI_LOG; break;
+    case 'u': item = MI_PORT; break;
+    case 'd':
+    case 't':
+      if (base == 'd') cfg.dtr ^= 1;
+      else cfg.rts ^= 1;
+      usbserial::setLines(cfg.dtr, cfg.rts);
+      settingsSave();
+      menuValue(MI_LINES, v, sizeof v);
+      info("[USB lines] %s", v);
+      return true;
     case 'c': changeItem(MI_CLEAR, 1); needFull = true; return true;
     case '-': changeItem(MI_BRIGHT, -1); return true;
     case '=': changeItem(MI_BRIGHT, 1); return true;
@@ -825,7 +899,7 @@ void setup() {
   bar.setFont(&fonts::Font0);
 
   if (!kbd::begin()) info("Keyboard (TCA8418) not found");
-  uartBegin();
+  linkBegin();
 
   info("UART Shell " APP_VERSION "  Opt: settings  Fn+H: keys");
   drawStatus(true);
@@ -836,6 +910,17 @@ void setup() {
 
 void loop() {
   pumpUart();
+  if (usbPort()) {
+    switch (usbserial::poll()) {
+      case usbserial::EV_CONNECTED:
+        info("[usb] %s adapter connected", usbserial::name());
+        logConfigNote();
+        break;
+      case usbserial::EV_DISCONNECTED: info("[usb] adapter disconnected"); break;
+      case usbserial::EV_UNSUPPORTED: info("[usb] not a supported serial adapter"); break;
+      default: break;
+    }
+  }
   kbd::poll();
   Key k;
   while (kbd::get(k)) onKey(k);

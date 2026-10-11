@@ -8,8 +8,9 @@ A small, fast-booting serial terminal for the **M5Stack Cardputer ADV**. Plug a 
 - Set the baud rate by hand (preset list or any custom rate), or detect it automatically on demand. The detected rate is remembered.
 - Logs to a timestamped file on the SD card, one file per session.
 - Line mode (edit, then send) or raw mode (every key is sent at once).
+- Talks to the Grove UART, or to a USB-serial device plugged into the USB-C port (USB host mode). For example, the CAT port of a (tr)uSDX radio.
 - All settings are restored at the next launch, stored in NVS.
-- Works with [Launcher](https://bmorcelli.github.io/Launcher/catalog.html). It's a plain app image of about 420 KB with no data partition.
+- Works with [Launcher](https://bmorcelli.github.io/Launcher/catalog.html). It's a plain app image of about 470 KB with no data partition.
 
 Builds on ideas from [Evil-M5Project](https://github.com/7h30th3r0n3/Evil-M5project) (UART shell) and [UARTerm](https://github.com/Zolibot/UARTerm) (SD logging).
 
@@ -34,7 +35,9 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 | `Fn+B` | Detect the baud rate now (`Fn+Esc` cancels). The result is saved |
 | `Fn+[` / `Fn+]` | Previous / next standard baud rate |
 | `Fn+F` | Cycle the data/parity/stop format (8N1, 8E1, 8O1, 8N2, 7E1, 7O1) |
-| `Fn+S` | Swap the RX/TX pins |
+| `Fn+U` | Switch the port between the Grove UART and USB host |
+| `Fn+S` | Swap the Grove RX/TX pins |
+| `Fn+D` / `Fn+T` | Turn the USB adapter's DTR / RTS line on or off |
 | `Fn+R` | Switch between line mode and raw mode |
 | `Fn+N` | Cycle what Enter sends: CR, LF, CRLF or nothing |
 | `Fn+E` | Cycle local echo: hide echo, show all, off |
@@ -54,6 +57,32 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 ### Settings menu (`Opt`)
 
 `;` / `.` select an item, `,` / `/` / Enter change it, and `` ` ``, Opt or Backspace close the menu. On the *Baud rate* item, type digits and press Enter to set a custom rate. The menu also has an item to reboot the device, which returns you to Launcher.
+
+## USB serial devices (USB host mode)
+
+Set **Port** to *USB* (`Fn+U`, or in the settings menu) and the Cardputer acts as a USB host on its USB-C port. It then talks to a USB-serial device, such as the CAT/serial port of a (tr)uSDX transceiver, the same way it talks to the Grove UART. Baud rate, data format, baud detection, logging and echo all work the same.
+
+Supported devices:
+
+| Device | Examples |
+|--------|----------|
+| WCH CH340 / CH341 | Most Arduino Nano clones, cheap USB-TTL cables, and likely the (tr)uSDX (check which chip your build uses) |
+| Silicon Labs CP210x | CP2102 / CP2104 modules, many ESP32 dev boards |
+| FTDI FT232R / FT230X / FT2232H / FT232H | FTDI cables and boards |
+| Standard USB CDC-ACM | CH343 / CH9102, Arduino boards with native USB, RP2040, STM32 VCP |
+
+The status bar shows `U:CH34x` (or the detected type) when an adapter is connected, and `U:--` in red when nothing is connected. Plugging and unplugging is detected automatically. Settings are re-applied each time an adapter connects.
+
+**DTR / RTS** start off. Many boards with a USB-serial chip use DTR or RTS to reset the microcontroller. Some radios use them for PTT (transmit) or CW keying, so leave them off unless you know your device needs them. Some CDC devices only send data once DTR is on; use `Fn+D` for those.
+
+**For (tr)uSDX CAT control:** set the baud rate to match the radio's CAT setting (115200 is common). Set *Enter sends* to `None` (`Fn+N`), because Kenwood-style CAT commands end with `;`, for example `FA;` or `IF;`. Line mode works well for this.
+
+### Hardware notes
+
+- **Cable:** you need a USB-C OTG adapter or cable. The Cardputer's port is USB-C, so use C-to-A-female with the device's normal cable, or a direct C-to-whatever OTG cable.
+- **Power:** a USB host normally supplies 5 V to the device. I couldn't confirm that the Cardputer ADV outputs 5 V on its USB-C port; M5Stack documents it only for charging and programming. If the adapter doesn't show up, it probably has no power. Use an **OTG Y-cable with a separate power input**, which feeds 5 V to the device while the data lines go to the Cardputer. USB hubs, powered or not, don't work: the USB host stack in this ESP-IDF version has no hub support.
+- **Flashing:** while USB host mode is active, the USB-C port is no longer the Cardputer's own USB serial/JTAG. To flash over USB, switch the port back to Grove and reboot, or start the board in download mode (hold `G0` while plugging in or resetting). Installing through Launcher from the SD card is not affected.
+- **Startup:** USB host mode starts only when the port is set to USB. In Grove mode, the USB-C port behaves as before.
 
 ## Baud rate detection
 
@@ -148,7 +177,7 @@ The same files also stay in `.pio/build/cardputer-adv/` as `firmware.bin` and `u
 
 ## Using it with Launcher
 
-Copy `dist/UART_Shell_v<ver>_CardputerADV.bin` to the SD card (any folder). On the Cardputer, open Launcher, choose **SD**, select the file and then **Install**. The app doesn't use SPIFFS or FAT partitions, so Launcher only installs the 420 KB app image. Settings are stored in NVS under the `uartshell` namespace, so they survive reinstalls and switching between apps. To get back to Launcher, reset the device or use *Reboot* in the settings menu.
+Copy `dist/UART_Shell_v<ver>_CardputerADV.bin` to the SD card (any folder). On the Cardputer, open Launcher, choose **SD**, select the file and then **Install**. The app doesn't use SPIFFS or FAT partitions, so Launcher only installs the 470 KB app image. Settings are stored in NVS under the `uartshell` namespace, so they survive reinstalls and switching between apps. To get back to Launcher, reset the device or use *Reboot* in the settings menu.
 
 ## Project layout
 
@@ -158,6 +187,7 @@ src/term.*         scrollback ring buffer (2000 lines x 40 columns)
 src/keyboard.*     TCA8418 keyboard driver for the Cardputer ADV
 src/display.h      fixed ST7789 panel config (LovyanGFX)
 src/sdlog.*        buffered SD session logger
+src/usbserial.*    USB host driver for CDC-ACM, CH34x, CP210x and FTDI adapters
 src/settings.*     settings stored in NVS
 partitions.csv     8 MB layout with two OTA app slots and no data partitions
 tools/merge_bin.py post-build step that creates the merged image and dist/ package
@@ -167,4 +197,5 @@ tools/merge_bin.py post-build step that creates the merged image and dist/ packa
 
 - Supports the Cardputer **ADV** only (the TCA8418 keyboard). The original Cardputer uses a GPIO keyboard matrix and is not supported.
 - ANSI escape sequences (colors, cursor movement) are removed, not interpreted. Full-screen programs like `vi` or `top` won't display correctly.
+- USB host mode supports one adapter at a time, plugged in directly (no hubs). On multi-port chips, only the first port is used.
 - Baud detection needs the target to send text. It can't detect binary protocols, so set the rate by hand for those.

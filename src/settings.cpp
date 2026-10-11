@@ -11,9 +11,8 @@ Settings cfg;
 void settingsLoad() {
   Preferences p;
   if (!p.begin(NS, true)) return;
-  if (p.getUChar("ver", 0) == VERSION && p.getBytesLength("cfg") == sizeof(Settings)) {
-    p.getBytes("cfg", &cfg, sizeof(Settings));
-  }
+  size_t n = p.getBytesLength("cfg");
+  if (p.getUChar("ver", 0) == VERSION && n && n <= sizeof(Settings)) p.getBytes("cfg", &cfg, n);
   p.end();
 }
 
