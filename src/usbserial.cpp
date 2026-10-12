@@ -82,10 +82,27 @@ int idfLog(const char *fmt, va_list ap) {
 // read. Used only to report progress: if this line never shows up, enumeration stalls
 // before (reset/address); if it shows up but the device never attaches, after it
 // (configuration or string descriptors).
+//
+// It also turns away devices that can never be a serial port (sound chips, HID, storage).
+// The S3's USB controller has only 8 host channels and every enumerated device keeps one
+// for its control endpoint, so e.g. a radio's built-in sound card would otherwise leave
+// too few channels to open the serial chip. Rejected devices are released by ESP-IDF.
 bool enumFilter(const usb_device_desc_t *dd, uint8_t *) {
-  logf("enum %04x:%04x class %02x, strings m%u p%u s%u", dd->idVendor, dd->idProduct,
-       dd->bDeviceClass, dd->iManufacturer, dd->iProduct, dd->iSerialNumber);
-  return true;
+  static const uint16_t NON_SERIAL_VIDS[] = {
+      0x0d8c,  // C-Media (USB sound chips, "USB PnP Sound Device")
+      0x08bb,  // Texas Instruments PCM29xx audio codecs
+      0x1b3f,  // Generalplus audio
+      0x0c76,  // JMTek audio
+      0x262a,  // SAVITECH audio
+  };
+  uint8_t cls = dd->bDeviceClass;
+  bool reject = cls == 0x01 || cls == 0x03 || cls == 0x08 || cls == 0x0E || cls == 0xE0;
+  for (uint16_t v : NON_SERIAL_VIDS)
+    if (dd->idVendor == v) reject = true;
+  if (cls == 0x09) reject = false;  // hubs are always needed
+  logf("enum %04x:%04x class %02x%s", dd->idVendor, dd->idProduct, cls,
+       reject ? " - not serial, released" : "");
+  return !reject;
 }
 
 // Attached devices that have at least one serial port. They stay open so that the
@@ -103,6 +120,7 @@ struct Port {
 };
 Dev devs[MAX_DEVS];
 Port ports[MAX_PORTS];
+bool portFailed[MAX_PORTS];  // claim failed; not retried until devices change or user picks it
 int devCount = 0, portCnt = 0, active = -1;
 PortId pref = {0, 0, 0, 0};
 
@@ -362,7 +380,11 @@ bool activate(int i) {
   mps0 = d.mps0;
   esp_err_t err = usb_host_interface_claim(client, dev, dataIf, 0);
   if (err != ESP_OK) {
-    logf("claim iface %u failed: %s", dataIf, esp_err_to_name(err));
+    if (err == ESP_ERR_NOT_SUPPORTED)
+      logf("port %d: no free USB host channels (S3 has 8); unplug other devices", i + 1);
+    else
+      logf("port %d: claim failed: %s", i + 1, esp_err_to_name(err));
+    portFailed[i] = true;
     dev = nullptr;
     chip = NONE;
     return false;
@@ -501,6 +523,7 @@ bool removeDevice(usb_device_handle_t h) {
     if (ports[i].dev == di) continue;
     Port q = ports[i];
     if (q.dev > di) q.dev--;
+    portFailed[n] = portFailed[i];
     ports[n++] = q;
   }
   portCnt = n;
@@ -517,12 +540,13 @@ bool removeDevice(usb_device_handle_t h) {
 }
 
 int bestPort() {
-  int best = 0, score = -1;
+  int best = -1, score = -1;
   for (int i = 0; i < portCnt; i++) {
+    if (portFailed[i]) continue;
     int s = prefScore(i);
     if (s > score) best = i, score = s;
   }
-  return portCnt ? best : -1;
+  return best;
 }
 
 }  // namespace
@@ -585,6 +609,7 @@ void setPreferred(const PortId &id) { pref = id; }
 bool selectPort(int i) {
   if (i < 0 || i >= portCnt) return false;
   pref = idOf(i);
+  portFailed[i] = false;  // an explicit choice is always retried
   if (i == active && ready) return true;
   deactivate();
   return activate(i);
@@ -641,8 +666,11 @@ Event poll() {
   if (!installed) return EV_NONE;
   Event ev = EV_NONE;
   usb_device_handle_t h;
-  while (xQueueReceive(goneDevs, &h, 0) == pdTRUE)
+  bool removed = false;
+  while (xQueueReceive(goneDevs, &h, 0) == pdTRUE) {
+    removed = true;
     if (removeDevice(h)) ev = EV_DISCONNECTED;
+  }
 
   uint8_t addr;
   bool added = false;
@@ -650,6 +678,8 @@ Event poll() {
     scanDevice(addr);
     added = true;
   }
+  if (added || removed)  // channels may have been freed: retry failed ports
+    for (int i = 0; i < MAX_PORTS; i++) portFailed[i] = false;
 
   // Connect when nothing is active, or switch when the preferred port just appeared.
   int want = bestPort();
