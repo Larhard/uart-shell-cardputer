@@ -39,6 +39,7 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 | `Fn+S` | Swap the Grove RX/TX pins |
 | `Fn+D` / `Fn+T` | Turn the USB adapter's DTR / RTS line on or off |
 | `Fn+X` | Apply the FX-4CR CAT preset (see below) |
+| `Fn+I` | USB diagnostics: host state and every device on the bus |
 | `Fn+R` | Switch between line mode and raw mode |
 | `Fn+N` | Cycle what Enter sends: CR, LF, CRLF or nothing |
 | `Fn+E` | Cycle local echo: hide echo, show all, off |

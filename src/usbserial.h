@@ -23,6 +23,11 @@ void flushInput();
 
 enum Event { EV_NONE, EV_CONNECTED, EV_DISCONNECTED, EV_UNSUPPORTED };
 
+// Diagnostic messages (host start-up, attached devices, setup errors) for the terminal.
+bool nextLog(char *out, size_t n);
+// Queue a summary of the USB host state and every enumerated device as log messages.
+void report();
+
 // Call from loop(): finishes connecting newly attached devices, cleans up removed ones.
 Event poll();
 

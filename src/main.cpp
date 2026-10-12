@@ -710,7 +710,7 @@ static void showHelp() {
   info("Opt settings  Fn+B detect baud");
   info("Fn+[ ] baud -/+  Fn+F frame  Fn+S swap");
   info("Fn+U Grove/USB  Fn+D DTR  Fn+T RTS");
-  info("Fn+X FX-4CR CAT preset");
+  info("Fn+X FX-4CR CAT preset  Fn+I USB info");
   info("Fn+R raw/line  Fn+N enter  Fn+E echo");
   info("Fn+L SD log  Fn+C clear  Fn+- = bright");
   info("Fn+; . line  Fn+, / page  Fn+Ent end");
@@ -727,6 +727,10 @@ static bool shortcut(uint8_t base) {
     case '[': quickBaud(-1); return true;
     case ']': quickBaud(1); return true;
     case 'h': showHelp(); return true;
+    case 'i':
+      if (!usbPort()) info("[usb] port is Grove; Fn+U switches to USB");
+      else usbserial::report();
+      return true;
     case 'x': applyRadioPreset(); settingsSave(); needFull = true; inputDirty = true; return true;
     case 'f': item = MI_FRAME; break;
     case 's': item = MI_PINS; break;
@@ -941,6 +945,8 @@ void loop() {
       default: break;
     }
   }
+  char usbLog[48];
+  while (usbserial::nextLog(usbLog, sizeof usbLog)) info("[usb] %s", usbLog);
   kbd::poll();
   Key k;
   while (kbd::get(k)) onKey(k);

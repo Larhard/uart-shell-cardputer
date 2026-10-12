@@ -1,6 +1,8 @@
 #include "usbserial.h"
 
 #include <Arduino.h>
+#include <esp_err.h>
+#include <stdarg.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/stream_buffer.h>
@@ -25,9 +27,24 @@ SemaphoreHandle_t ctrlDone = nullptr, outDone = nullptr;
 // Addresses of newly enumerated devices, queued by the client task and opened by poll().
 // Behind a hub several devices show up at once (hub, serial chip, sound chip, ...).
 QueueHandle_t newDevs = nullptr;
+
+struct LogMsg { char s[48]; };
+QueueHandle_t logQ = nullptr;
+esp_err_t installErr = ESP_ERR_INVALID_STATE;  // result of the last start attempt
+
+void logf(const char *fmt, ...) {
+  if (!logQ) return;
+  LogMsg m;
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(m.s, sizeof m.s, fmt, ap);
+  va_end(ap);
+  xQueueSend(logQ, &m, 0);
+}
 volatile bool gone = false;
 
 usb_device_handle_t dev = nullptr;
+uint8_t devAddr = 0;  // bus address of dev
 Chip chip = NONE;
 bool ready = false;
 uint8_t dataIf = 0, commIf = 0, epIn = 0, epOut = 0, mps0 = 8;
@@ -56,6 +73,7 @@ void clientEvent(const usb_host_client_event_msg_t *m, void *) {
   if (m->event == USB_HOST_CLIENT_EVENT_NEW_DEV) {
     uint8_t addr = m->new_dev.address;
     xQueueSend(newDevs, &addr, 0);
+    logf("device attached (addr %u)", addr);
   } else if (m->event == USB_HOST_CLIENT_EVENT_DEV_GONE) {
     if (dev && m->dev_gone.dev_hdl == dev) gone = true;
   }
@@ -290,7 +308,9 @@ void closeDevice() {
 
 // Returns EV_CONNECTED, EV_UNSUPPORTED, or EV_NONE if the device could not be opened.
 int openDevice(uint8_t addr) {
-  if (usb_host_device_open(client, addr, &dev) != ESP_OK) {
+  esp_err_t err = usb_host_device_open(client, addr, &dev);
+  if (err != ESP_OK) {
+    logf("addr %u: open failed: %s", addr, esp_err_to_name(err));
     dev = nullptr;
     return EV_NONE;
   }
@@ -299,12 +319,16 @@ int openDevice(uint8_t addr) {
   usb_host_get_device_descriptor(dev, &dd);
   usb_host_get_active_config_descriptor(dev, &cd);
   mps0 = dd->bMaxPacketSize0;
+  devAddr = addr;
+  logf("addr %u: %04x:%04x class %02x, %u ifaces", addr, dd->idVendor, dd->idProduct,
+       dd->bDeviceClass, cd->bNumInterfaces);
 
   Iface ifc;
   int comm;
   if (!findInterface(cd, ifc, comm)) {
     // Hubs, sound chips and HID parts of a radio are expected; only report other devices.
     bool expected = dd->bDeviceClass == 0x09 || hasClass(cd, 0x01) || hasClass(cd, 0x03) || hasClass(cd, 0x09);
+    logf("addr %u: %s, skipped", addr, dd->bDeviceClass == 0x09 || hasClass(cd, 0x09) ? "hub" : "no serial port");
     usb_host_device_close(client, dev);
     dev = nullptr;
     return expected ? EV_NONE : EV_UNSUPPORTED;
@@ -316,6 +340,7 @@ int openDevice(uint8_t addr) {
   else if (vid == 0x0403) chip = FTDI;
   else if (comm >= 0) chip = CDC;
   else {
+    logf("addr %u: unknown serial chip, skipped", addr);
     usb_host_device_close(client, dev);
     dev = nullptr;
     return EV_UNSUPPORTED;
@@ -326,7 +351,9 @@ int openDevice(uint8_t addr) {
   mpsIn = ifc.mpsIn ? ifc.mpsIn : 64;
   commIf = comm >= 0 ? comm : dataIf;
 
-  if (usb_host_interface_claim(client, dev, dataIf, 0) != ESP_OK) {
+  err = usb_host_interface_claim(client, dev, dataIf, 0);
+  if (err != ESP_OK) {
+    logf("claim iface %u failed: %s", dataIf, esp_err_to_name(err));
     chip = NONE;
     closeDevice();
     return EV_UNSUPPORTED;
@@ -343,6 +370,7 @@ int openDevice(uint8_t addr) {
       uint8_t v[2] = {0, 0};
       control(0xC0, 0x5F, 0, 0, v, 2);  // read version
       chVersion = v[0];
+      logf("CH34x chip version 0x%02x", chVersion);
       control(0x40, 0xA1, 0, 0);  // serial init
       break;
     }
@@ -358,8 +386,8 @@ int openDevice(uint8_t addr) {
       break;
     default: break;
   }
-  applyLine();
-  applyModem();
+  if (!applyLine()) logf("line setup (baud/format) failed");
+  if (!applyModem()) logf("DTR/RTS setup failed");
   flushInput();
   ready = true;
   submitIn();
@@ -370,21 +398,32 @@ int openDevice(uint8_t addr) {
 
 void begin() {
   if (installed) return;
-  rx = xStreamBufferCreate(8192, 1);
-  newDevs = xQueueCreate(8, sizeof(uint8_t));
-  ctrlDone = xSemaphoreCreateBinary();
-  outDone = xSemaphoreCreateBinary();
+  if (!logQ) {
+    logQ = xQueueCreate(16, sizeof(LogMsg));
+    rx = xStreamBufferCreate(8192, 1);
+    newDevs = xQueueCreate(8, sizeof(uint8_t));
+    ctrlDone = xSemaphoreCreateBinary();
+    outDone = xSemaphoreCreateBinary();
+  }
   usb_host_config_t hc = {};
   hc.skip_phy_setup = false;
   hc.intr_flags = ESP_INTR_FLAG_LEVEL1;
-  if (usb_host_install(&hc) != ESP_OK) return;
+  installErr = usb_host_install(&hc);
+  if (installErr != ESP_OK) {
+    logf("host start failed: %s", esp_err_to_name(installErr));
+    return;
+  }
   xTaskCreatePinnedToCore(hostTask, "usbh", 4096, nullptr, 3, nullptr, 0);
   usb_host_client_config_t cc = {};
   cc.is_synchronous = false;
   cc.max_num_event_msg = 5;
   cc.async.client_event_callback = clientEvent;
   cc.async.callback_arg = nullptr;
-  if (usb_host_client_register(&cc, &client) != ESP_OK) return;
+  installErr = usb_host_client_register(&cc, &client);
+  if (installErr != ESP_OK) {
+    logf("client register failed: %s", esp_err_to_name(installErr));
+    return;
+  }
   usb_host_transfer_alloc(IN_SIZE, 0, &xIn);
   usb_host_transfer_alloc(OUT_SIZE, 0, &xOut);
   usb_host_transfer_alloc(CTRL_SIZE, 0, &xCtrl);
@@ -392,6 +431,7 @@ void begin() {
   xOut->callback = outCb;
   xTaskCreatePinnedToCore(clientTask, "usbc", 4096, nullptr, 2, nullptr, 0);
   installed = true;
+  logf("host started, waiting for a device");
 }
 
 bool connected() { return ready; }
@@ -453,6 +493,37 @@ Event poll() {
   uint8_t addr;
   if (!dev && xQueueReceive(newDevs, &addr, 0) == pdTRUE) return (Event)openDevice(addr);
   return EV_NONE;
+}
+
+bool nextLog(char *out, size_t n) {
+  LogMsg m;
+  if (!logQ || xQueueReceive(logQ, &m, 0) != pdTRUE) return false;
+  snprintf(out, n, "%s", m.s);
+  return true;
+}
+
+void report() {
+  if (!installed) {
+    logf("host not running (%s)", esp_err_to_name(installErr));
+    return;
+  }
+  usb_host_lib_info_t li;
+  if (usb_host_lib_info(&li) == ESP_OK) logf("host ok: %d device(s) enumerated", li.num_devices);
+  uint8_t addrs[8];
+  int n = 0;
+  usb_host_device_addr_list_fill(sizeof addrs, addrs, &n);
+  for (int i = 0; i < n; i++) {
+    bool mine = dev && addrs[i] == devAddr;
+    usb_device_handle_t h = dev;
+    if (!mine && usb_host_device_open(client, addrs[i], &h) != ESP_OK) continue;
+    const usb_device_desc_t *dd;
+    usb_host_get_device_descriptor(h, &dd);
+    logf("addr %u: %04x:%04x class %02x%s", addrs[i], dd->idVendor, dd->idProduct, dd->bDeviceClass,
+         mine ? " (in use)" : "");
+    if (!mine) usb_host_device_close(client, h);
+  }
+  if (!n) logf("nothing on the bus: check OTG cable / 5V power");
+  if (ready) logf("connected: %s", CHIP_NAMES[chip]);
 }
 
 }  // namespace usbserial
