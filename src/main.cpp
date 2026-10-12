@@ -75,6 +75,7 @@ static void linkBegin() {
   uart.end();
   if (usbPort()) {
     usbserial::begin();
+    usbserial::setPreferred({cfg.usbVid, cfg.usbPid, cfg.usbIface, cfg.usbHubPort});
     usbserial::setLine(cfg.baud, f.bits, f.parity, f.stop);
     usbserial::setLines(cfg.dtr, cfg.rts);
   } else {
@@ -107,7 +108,11 @@ static void linkFlushInput() {
 }
 
 static void portDesc(char *out, size_t sz) {
-  if (usbPort()) snprintf(out, sz, "USB %s", usbserial::connected() ? usbserial::name() : "(none)");
+  if (usbPort()) {
+    char l[32];
+    usbserial::portLabel(usbserial::activePort(), l, sizeof l);
+    snprintf(out, sz, "USB %s", l);
+  }
   else snprintf(out, sz, "RX=G%d TX=G%d", cfg.swapPins ? 2 : 1, cfg.swapPins ? 1 : 2);
 }
 
@@ -498,8 +503,11 @@ static void drawStatus(bool force) {
   if (!follow) snprintf(scroll, sizeof scroll, "^%lu", (unsigned long)(term::last() - viewBottom));
 
   char sig[80];
-  char port[12];
-  if (usbPort()) snprintf(port, sizeof port, "U:%s", usbserial::connected() ? usbserial::name() : "--");
+  char port[16];
+  if (usbPort() && usbserial::portCount() > 1 && usbserial::connected())
+    snprintf(port, sizeof port, "U:%s %d/%d", usbserial::name(), usbserial::activePort() + 1, usbserial::portCount());
+  else if (usbPort())
+    snprintf(port, sizeof port, "U:%s", usbserial::connected() ? usbserial::name() : "--");
   else snprintf(port, sizeof port, "RX:G%d", cfg.swapPins ? 2 : 1);
   const char *lines = !usbPort() ? "" : cfg.dtr && cfg.rts ? "DR" : cfg.dtr ? "D" : cfg.rts ? "R" : "";
   snprintf(sig, sizeof sig, "%s|%s|%s|%s|%d|%d|%s|%s|%d%d", baud, FRAMES[cfg.frame].name, port, lines,
@@ -531,9 +539,9 @@ static void drawStatus(bool force) {
 // ---------------------------------------------------------------------------
 // Settings menu
 // ---------------------------------------------------------------------------
-enum MenuItem { MI_PORT, MI_BAUD, MI_FRAME, MI_PINS, MI_LINES, MI_INPUT, MI_EOL, MI_ECHO, MI_LOG,
+enum MenuItem { MI_PORT, MI_USBDEV, MI_BAUD, MI_FRAME, MI_PINS, MI_LINES, MI_INPUT, MI_EOL, MI_ECHO, MI_LOG,
                 MI_TS, MI_BRIGHT, MI_PRESET, MI_CLEAR, MI_REBOOT, MI_COUNT };
-static const char *MENU_LABELS[] = {"Port", "Baud rate", "Data/parity/stop", "Grove pins",
+static const char *MENU_LABELS[] = {"Port", "USB port", "Baud rate", "Data/parity/stop", "Grove pins",
                                     "USB DTR / RTS", "Input mode", "Enter sends", "Local echo",
                                     "SD logging", "Log timestamps", "Brightness",
                                     "FX-4CR CAT preset", "Clear screen", "Reboot (Launcher)"};
@@ -554,6 +562,18 @@ static void menuValue(int item, char *out, size_t sz) {
       else snprintf(out, sz, "Grove");
       break;
     case MI_LINES: snprintf(out, sz, "DTR %s RTS %s", cfg.dtr ? "on" : "off", cfg.rts ? "on" : "off"); break;
+    case MI_USBDEV: {
+      int n = usbserial::portCount();
+      if (!usbPort()) snprintf(out, sz, "-");
+      else if (!n) snprintf(out, sz, "(none found)");
+      else {
+        char l[26];
+        usbserial::portLabel(usbserial::activePort(), l, sizeof l);
+        if (n > 1) snprintf(out, sz, "%d/%d %s", usbserial::activePort() + 1, n, l);
+        else snprintf(out, sz, "%s", l);
+      }
+      break;
+    }
     case MI_FRAME: snprintf(out, sz, "%s", FRAMES[cfg.frame].name); break;
     case MI_PINS: snprintf(out, sz, cfg.swapPins ? "RX=G2 TX=G1" : "RX=G1 TX=G2"); break;
     case MI_INPUT: snprintf(out, sz, cfg.rawMode ? "Raw keys" : "Line"); break;
@@ -657,6 +677,21 @@ static void changeItem(int item, int dir) {
       if (!usbPort()) linkBegin();
       logConfigNote();
       break;
+    case MI_USBDEV: {
+      int n = usbserial::portCount();
+      if (!usbPort() || !n) break;
+      int i = (usbserial::activePort() + dir + n) % n;
+      if (usbserial::activePort() < 0) i = dir > 0 ? 0 : n - 1;
+      if (usbserial::selectPort(i)) {
+        usbserial::PortId id = usbserial::portId(i);
+        cfg.usbVid = id.vid;
+        cfg.usbPid = id.pid;
+        cfg.usbIface = id.iface;
+        cfg.usbHubPort = id.hubPort;
+        logConfigNote();
+      }
+      break;
+    }
     case MI_LINES: {
       uint8_t v = ((cfg.rts << 1 | cfg.dtr) + dir + 4) % 4;  // off, DTR, RTS, both
       cfg.dtr = v & 1;
@@ -709,7 +744,8 @@ static void quickBaud(int dir) {
 static void showHelp() {
   info("Opt settings  Fn+B detect baud");
   info("Fn+[ ] baud -/+  Fn+F frame  Fn+S swap");
-  info("Fn+U Grove/USB  Fn+D DTR  Fn+T RTS");
+  info("Fn+U Grove/USB  Fn+P next USB port");
+  info("Fn+D DTR  Fn+T RTS");
   info("Fn+X FX-4CR CAT preset  Fn+I USB info");
   info("Fn+R raw/line  Fn+N enter  Fn+E echo");
   info("Fn+L SD log  Fn+C clear  Fn+- = bright");
@@ -739,6 +775,17 @@ static bool shortcut(uint8_t base) {
     case 'e': item = MI_ECHO; break;
     case 'l': item = MI_LOG; break;
     case 'u': item = MI_PORT; break;
+    case 'p':
+      if (!usbPort()) {
+        info("[usb] port is Grove; Fn+U switches to USB");
+        return true;
+      }
+      if (usbserial::portCount() < 2) {
+        info("[usb] %d USB serial port(s) found", usbserial::portCount());
+        return true;
+      }
+      item = MI_USBDEV;
+      break;
     case 'd':
     case 't':
       if (base == 'd') cfg.dtr ^= 1;
@@ -936,12 +983,14 @@ void loop() {
   pumpUart();
   if (usbPort()) {
     switch (usbserial::poll()) {
-      case usbserial::EV_CONNECTED:
-        info("[usb] %s adapter connected", usbserial::name());
+      case usbserial::EV_CONNECTED: {
+        char l[32];
+        usbserial::portLabel(usbserial::activePort(), l, sizeof l);
+        info("[usb] connected: %s", l);
         logConfigNote();
         break;
-      case usbserial::EV_DISCONNECTED: info("[usb] adapter disconnected"); break;
-      case usbserial::EV_UNSUPPORTED: info("[usb] not a supported serial adapter"); break;
+      }
+      case usbserial::EV_DISCONNECTED: info("[usb] disconnected"); break;
       default: break;
     }
   }

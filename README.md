@@ -38,6 +38,7 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 | `Fn+U` | Switch the port between the Grove UART and USB host |
 | `Fn+S` | Swap the Grove RX/TX pins |
 | `Fn+D` / `Fn+T` | Turn the USB adapter's DTR / RTS line on or off |
+| `Fn+P` | Switch to the next USB serial port, when several are attached |
 | `Fn+X` | Apply the FX-4CR CAT preset (see below) |
 | `Fn+I` | USB diagnostics: host state and every device on the bus |
 | `Fn+R` | Switch between line mode and raw mode |
@@ -74,6 +75,17 @@ Supported devices:
 | Standard USB CDC-ACM | CH343 / CH9102, Arduino boards with native USB, RP2040, STM32 VCP |
 
 The status bar shows `U:CH34x` (or the detected type) when an adapter is connected, and `U:--` in red when nothing is connected. Plugging and unplugging is detected automatically. Settings are re-applied each time an adapter connects.
+
+### Several serial ports
+
+A device can offer more than one serial port. For example, a radio might have a CH340 and a second serial chip behind its internal hub, or a dual-port chip such as an FT2232, CP2105 or CH342. The app lists every port it can drive. Sound cards, hubs and HID devices are ignored.
+
+- The status bar shows which port is active, for example `U:CH34x 1/2`.
+- `Fn+P`, or *USB port* in the settings menu, switches to the next port.
+- `Fn+I` lists all ports and marks the active one with `*`.
+- Each port is shown as chip, VID:PID, interface (when a chip has several ports) and hub port, for example `CH34x 1a86:7523 hub2`.
+
+The port you choose is saved. At the next launch, or when the device is plugged in again, the app picks the same port, matching chip IDs, interface and hub port. If that port isn't there, it uses the first port it finds and switches back once your port appears. Two identical chips are told apart by the hub port they're plugged into.
 
 **DTR / RTS** start off. Many boards with a USB-serial chip use DTR or RTS to reset the microcontroller. Some radios use them for PTT (transmit) or CW keying, so leave them off unless you know your device needs them. Some CDC devices only send data once DTR is on; use `Fn+D` for those.
 
@@ -231,6 +243,6 @@ tools/merge_bin.py post-build step that creates the merged image and dist/ packa
 
 - Supports the Cardputer **ADV** only (the TCA8418 keyboard). The original Cardputer uses a GPIO keyboard matrix and is not supported.
 - ANSI escape sequences (colors, cursor movement) are removed, not interpreted. Full-screen programs like `vi` or `top` won't display correctly.
-- USB host mode uses one serial adapter at a time. Other devices behind a hub, such as a radio's sound chip, are ignored. On multi-port chips, only the first port is used.
+- USB host mode has one active serial port at a time (switch with `Fn+P`). Up to 6 devices and 8 serial ports are tracked.
 - The USB-serial support is written from the chip vendors' and Linux drivers' documented behavior. The FX-4CR USB layout (a hub with a CH340 inside) is inferred from its manual, not checked against the radio.
 - Baud detection needs the target to send text. It can't detect binary protocols, so set the rate by hand for those.

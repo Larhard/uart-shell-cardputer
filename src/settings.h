@@ -20,6 +20,9 @@ struct Settings {
   uint8_t port = PORT_GROVE;
   uint8_t dtr = 0;  // USB adapters only
   uint8_t rts = 0;
+  // Preferred USB serial port (0 = none chosen yet): chip IDs, interface, hub port.
+  uint16_t usbVid = 0, usbPid = 0;
+  uint8_t usbIface = 0, usbHubPort = 0;
 };
 
 extern Settings cfg;
