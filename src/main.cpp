@@ -994,7 +994,7 @@ void loop() {
       default: break;
     }
   }
-  char usbLog[48];
+  char usbLog[80];
   while (usbserial::nextLog(usbLog, sizeof usbLog)) info("[usb] %s", usbLog);
   kbd::poll();
   Key k;

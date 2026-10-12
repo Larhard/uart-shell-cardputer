@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <esp_err.h>
+#include <esp_log.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/stream_buffer.h>
@@ -30,7 +31,7 @@ SemaphoreHandle_t ctrlDone = nullptr, outDone = nullptr;
 QueueHandle_t newDevs = nullptr;  // uint8_t bus addresses of newly enumerated devices
 QueueHandle_t goneDevs = nullptr;  // usb_device_handle_t of removed devices
 
-struct LogMsg { char s[48]; };
+struct LogMsg { char s[80]; };
 QueueHandle_t logQ = nullptr;
 
 void logf(const char *fmt, ...) {
@@ -41,6 +42,40 @@ void logf(const char *fmt, ...) {
   vsnprintf(m.s, sizeof m.s, fmt, ap);
   va_end(ap);
   xQueueSend(logQ, &m, 0);
+}
+
+// ESP-IDF's own USB host messages (enumeration, hub, controller errors) are copied into
+// the terminal log; everything else goes to the previous log output unchanged.
+vprintf_like_t prevVprintf = nullptr;
+
+int idfLog(const char *fmt, va_list ap) {
+  static const char *TAGS[] = {"ENUM", "USBH", "HUB", "EXT_HUB", "EXT_PORT", "HCD", "USB HOST", "usb_phy"};
+  char line[160];
+  va_list copy;
+  va_copy(copy, ap);
+  vsnprintf(line, sizeof line, fmt, copy);
+  va_end(copy);
+  // Format: "<ESC>[0;31mE (1234) TAG: message<ESC>[0m<LF>" (colors optional)
+  const char *msg = strchr(line, ')');
+  bool usb = false;
+  for (const char *t : TAGS)
+    if (msg && strncmp(msg + 2, t, strlen(t)) == 0) usb = true;
+  if (usb) {
+    char out[72];
+    size_t n = 0;
+    for (const char *c = msg + 2; *c && n < sizeof out - 1; c++) {
+      if (*c == 0x1B) {  // skip color codes
+        while (*c && *c != 'm') c++;
+        if (!*c) break;
+        continue;
+      }
+      if (*c == '\n' || *c == '\r') continue;
+      out[n++] = *c;
+    }
+    out[n] = 0;
+    logf("idf %s", out);
+  }
+  return prevVprintf ? prevVprintf(fmt, ap) : 0;
 }
 
 // Attached devices that have at least one serial port. They stay open so that the
@@ -492,6 +527,7 @@ void begin() {
     ctrlDone = xSemaphoreCreateBinary();
     outDone = xSemaphoreCreateBinary();
   }
+  if (!prevVprintf) prevVprintf = esp_log_set_vprintf(idfLog);
   usb_host_config_t hc = {};
   hc.skip_phy_setup = false;
   hc.intr_flags = ESP_INTR_FLAG_LEVEL1;
@@ -625,8 +661,9 @@ void report() {
     logf("host not running (%s)", esp_err_to_name(installErr));
     return;
   }
-  usb_host_lib_info_t li;
-  if (usb_host_lib_info(&li) == ESP_OK) logf("host ok, %d device(s) on the bus", li.num_devices);
+  usb_host_lib_info_t li = {};
+  usb_host_lib_info(&li);
+  logf("host ok, %d device(s) on the bus", li.num_devices);
   uint8_t addrs[12];
   int n = 0;
   usb_host_device_addr_list_fill(sizeof addrs, addrs, &n);
@@ -641,7 +678,9 @@ void report() {
     logf("addr %u: %04x:%04x class %02x", addrs[i], dd->idVendor, dd->idProduct, dd->bDeviceClass);
     if (!mine) usb_host_device_close(client, h);
   }
-  if (!n) logf("nothing on the bus: check OTG cable / 5V power");
+  if (!li.num_devices) logf("nothing on the bus: check OTG cable / 5V power");
+  else if (n < li.num_devices)
+    logf("%d device(s) stuck in enumeration (see idf lines)", li.num_devices - n);
   for (int i = 0; i < portCnt; i++) {
     char l[40];
     label(i, l, sizeof l);
