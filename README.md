@@ -92,7 +92,7 @@ The port you choose is saved. At the next launch, or when the device is plugged 
 
 ### FX-4CR
 
-The BG2FX FX-4CR's USB port has a COM port and a USB sound card behind one cable. According to its manual, the CAT protocol is Kenwood TS-590S at 115200 baud, and PTT is on **RTS**. Inside, the radio has a USB hub (Terminus FE1.1s, `1a40:0801`) with three devices behind it: a C-Media sound chip (`0d8c:013c`), the CH340 CAT port (`1a86:7523`) and a CSR Bluetooth module (`0a12:4007`). The app keeps the sound chip and the Bluetooth module off the bus, so the S3's few USB host channels are left for the CH340.
+The BG2FX FX-4CR's USB port has a COM port and a USB sound card behind one cable. According to its manual, the CAT protocol is Kenwood TS-590S at 115200 baud, and PTT is on **RTS**. Inside, the radio has a USB hub (Terminus FE1.1s, `1a40:0801`) with three devices behind it: a C-Media sound chip (`0d8c:013c`), the CH340 CAT port (`1a86:7523`) and a CSR Bluetooth module (`0a12:4007`). The CSR chip is itself a small hub (`0a12:4010`) with the Bluetooth device behind it. The app keeps the sound chip and the whole CSR branch off the bus, so the S3's few USB host channels are left for the CH340.
 
 When the radio is plugged in, the hub sometimes fails to reset one of its ports, and ESP-IDF doesn't retry that. If the hub appears but no serial port shows up, the app re-enumerates the bus automatically, up to 3 times. `Fn+Z` does the same by hand.
 

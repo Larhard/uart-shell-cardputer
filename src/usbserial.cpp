@@ -104,16 +104,16 @@ bool enumFilter(const usb_device_desc_t *dd, uint8_t *) {
       0x1b3f,  // Generalplus audio
       0x0c76,  // JMTek audio
       0x262a,  // SAVITECH audio
-      0x0a12,  // Cambridge Silicon Radio (Bluetooth modules, e.g. inside the FX-4CR)
+      0x0a12,  // Cambridge Silicon Radio: Bluetooth modules and their built-in hub
+               // (FX-4CR: hub 0a12:4010 with the Bluetooth device 0a12:4007 behind it)
   };
   uint8_t cls = dd->bDeviceClass;
   bool reject = cls == 0x01 || cls == 0x03 || cls == 0x08 || cls == 0x0E || cls == 0xE0;
+  if (cls == 0x09) reject = false;  // generic hubs are needed to reach serial chips
+  // Vendors listed above never carry a serial port, not even behind their own hubs.
   for (uint16_t v : NON_SERIAL_VIDS)
     if (dd->idVendor == v) reject = true;
-  if (cls == 0x09) {  // hubs are always needed
-    reject = false;
-    hubSeenMs = millis() | 1;
-  }
+  if (cls == 0x09 && !reject) hubSeenMs = millis() | 1;
   logf("enum %04x:%04x class %02x%s", dd->idVendor, dd->idProduct, cls,
        reject ? " - not serial, released" : "");
   return !reject;
@@ -714,12 +714,17 @@ Event poll() {
   if (powerOnAtMs && (int32_t)(now - powerOnAtMs) >= 0) {
     powerOnAtMs = 0;
     usb_host_lib_set_root_port_power(true);
-  } else if (!powerOnAtMs && portCnt == 0 && hubSeenMs && reenumTries < REENUM_MAX) {
+  } else if (!powerOnAtMs && portCnt == 0 && hubSeenMs) {
     // A hub port reset failed, or nothing serial appeared behind the hub in time.
     uint32_t waited = now - hubSeenMs;
     if ((hubPortError && waited > 1500) || waited > 5000) {
-      reenumTries++;
-      startReenumerate();
+      if (reenumTries < REENUM_MAX) {
+        reenumTries++;
+        startReenumerate();
+      } else {
+        hubSeenMs = 0;
+        logf("no serial port behind the hub; Fn+Z retries");
+      }
     }
   }
 
