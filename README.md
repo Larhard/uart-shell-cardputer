@@ -244,5 +244,6 @@ tools/merge_bin.py post-build step that creates the merged image and dist/ packa
 - Supports the Cardputer **ADV** only (the TCA8418 keyboard). The original Cardputer uses a GPIO keyboard matrix and is not supported.
 - ANSI escape sequences (colors, cursor movement) are removed, not interpreted. Full-screen programs like `vi` or `top` won't display correctly.
 - USB host mode has one active serial port at a time (switch with `Fn+P`). Up to 6 devices and 8 serial ports are tracked.
+- The ESP32-S3 USB controller has only 8 host channels. Every attached device uses one, a hub uses one more, and an open serial port uses 2-3. To leave room for the serial chip, USB sound chips, HID and storage devices are released during enumeration. If you still see "no free USB host channels", unplug other devices from the hub.
 - The USB-serial support is written from the chip vendors' and Linux drivers' documented behavior. The FX-4CR USB layout (a hub with a CH340 inside) is inferred from its manual, not checked against the radio.
 - Baud detection needs the target to send text. It can't detect binary protocols, so set the rate by hand for those.
