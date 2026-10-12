@@ -78,6 +78,16 @@ int idfLog(const char *fmt, va_list ap) {
   return prevVprintf ? prevVprintf(fmt, ap) : 0;
 }
 
+// Called by ESP-IDF in the middle of enumeration, right after the device descriptor was
+// read. Used only to report progress: if this line never shows up, enumeration stalls
+// before (reset/address); if it shows up but the device never attaches, after it
+// (configuration or string descriptors).
+bool enumFilter(const usb_device_desc_t *dd, uint8_t *) {
+  logf("enum %04x:%04x class %02x, strings m%u p%u s%u", dd->idVendor, dd->idProduct,
+       dd->bDeviceClass, dd->iManufacturer, dd->iProduct, dd->iSerialNumber);
+  return true;
+}
+
 // Attached devices that have at least one serial port. They stay open so that the
 // host reports their removal.
 struct Dev {
@@ -531,6 +541,9 @@ void begin() {
   usb_host_config_t hc = {};
   hc.skip_phy_setup = false;
   hc.intr_flags = ESP_INTR_FLAG_LEVEL1;
+#ifdef CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
+  hc.enum_filter_cb = enumFilter;
+#endif
   installErr = usb_host_install(&hc);
   if (installErr != ESP_OK) {
     logf("host start failed: %s", esp_err_to_name(installErr));
