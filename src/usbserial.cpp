@@ -1,6 +1,7 @@
 #include "usbserial.h"
 
 #include <Arduino.h>
+#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/stream_buffer.h>
 
@@ -21,7 +22,9 @@ usb_host_client_handle_t client = nullptr;
 StreamBufferHandle_t rx = nullptr;
 SemaphoreHandle_t ctrlDone = nullptr, outDone = nullptr;
 
-volatile uint8_t pendingAddr = 0;  // set by the client task, consumed by poll()
+// Addresses of newly enumerated devices, queued by the client task and opened by poll().
+// Behind a hub several devices show up at once (hub, serial chip, sound chip, ...).
+QueueHandle_t newDevs = nullptr;
 volatile bool gone = false;
 
 usb_device_handle_t dev = nullptr;
@@ -51,7 +54,8 @@ void hostTask(void *) {
 
 void clientEvent(const usb_host_client_event_msg_t *m, void *) {
   if (m->event == USB_HOST_CLIENT_EVENT_NEW_DEV) {
-    if (!dev && !pendingAddr) pendingAddr = m->new_dev.address;
+    uint8_t addr = m->new_dev.address;
+    xQueueSend(newDevs, &addr, 0);
   } else if (m->event == USB_HOST_CLIENT_EVENT_DEV_GONE) {
     if (dev && m->dev_gone.dev_hdl == dev) gone = true;
   }
@@ -253,6 +257,13 @@ bool findInterface(const usb_config_desc_t *cd, Iface &pick, int &commNum) {
   return bestValid;
 }
 
+bool hasClass(const usb_config_desc_t *cd, uint8_t cls) {
+  const uint8_t *p = (const uint8_t *)cd;
+  for (int off = 0; off + 9 <= cd->wTotalLength && p[off] >= 2; off += p[off])
+    if (p[off + 1] == 0x04 && p[off + 5] == cls) return true;
+  return false;
+}
+
 void closeDevice() {
   ready = false;
   if (!dev) return;
@@ -271,7 +282,9 @@ void closeDevice() {
   dev = nullptr;
   chip = NONE;
   commClaimed = false;
-  inBusy = outBusy = ctrlBusy = false;
+  inBusy = false;
+  outBusy = false;
+  ctrlBusy = false;
   gone = false;
 }
 
@@ -290,9 +303,11 @@ int openDevice(uint8_t addr) {
   Iface ifc;
   int comm;
   if (!findInterface(cd, ifc, comm)) {
+    // Hubs, sound chips and HID parts of a radio are expected; only report other devices.
+    bool expected = dd->bDeviceClass == 0x09 || hasClass(cd, 0x01) || hasClass(cd, 0x03) || hasClass(cd, 0x09);
     usb_host_device_close(client, dev);
     dev = nullptr;
-    return EV_UNSUPPORTED;
+    return expected ? EV_NONE : EV_UNSUPPORTED;
   }
   uint16_t vid = dd->idVendor;
   if (ifc.cls == 0x0A) chip = CDC;
@@ -356,6 +371,7 @@ int openDevice(uint8_t addr) {
 void begin() {
   if (installed) return;
   rx = xStreamBufferCreate(8192, 1);
+  newDevs = xQueueCreate(8, sizeof(uint8_t));
   ctrlDone = xSemaphoreCreateBinary();
   outDone = xSemaphoreCreateBinary();
   usb_host_config_t hc = {};
@@ -434,11 +450,8 @@ Event poll() {
     closeDevice();
     return EV_DISCONNECTED;
   }
-  if (pendingAddr && !dev) {
-    int r = openDevice(pendingAddr);
-    pendingAddr = 0;
-    return (Event)r;
-  }
+  uint8_t addr;
+  if (!dev && xQueueReceive(newDevs, &addr, 0) == pdTRUE) return (Event)openDevice(addr);
   return EV_NONE;
 }
 

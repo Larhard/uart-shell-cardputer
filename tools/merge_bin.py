@@ -18,8 +18,7 @@ def merge_bin(source, target, env):
     build = env.subst("$BUILD_DIR")
     project = env.subst("$PROJECT_DIR")
     platform = env.PioPlatform()
-    esptool = os.path.join(platform.get_package_dir("tool-esptoolpy"), "esptool.py")
-    boot_app0 = os.path.join(platform.get_package_dir("framework-arduinoespressif32"),
+    boot_app0 =os.path.join(platform.get_package_dir("framework-arduinoespressif32"),
                              "tools", "partitions", "boot_app0.bin")
     sections = [("0x0", os.path.join(build, "bootloader.bin")),
                 ("0x8000", os.path.join(build, "partitions.bin")),
@@ -27,8 +26,10 @@ def merge_bin(source, target, env):
                 ("0x10000", os.path.join(build, "firmware.bin"))]
     merged = os.path.join(build, "uart_shell_merged.bin")
     args = " ".join(f'{a} "{p}"' for a, p in sections)
-    env.Execute(f'"$PYTHONEXE" "{esptool}" --chip esp32s3 merge_bin -o "{merged}" '
-                f'--flash_mode dio --flash_size 8MB {args}')
+    # pioarduino installs esptool (v5) as a module in the build's Python environment.
+    if env.Execute(f'"$PYTHONEXE" -m esptool --chip esp32s3 merge-bin -o "{merged}" '
+                   f'--flash-mode dio --flash-size 8MB {args}'):
+        raise RuntimeError("esptool merge-bin failed")
 
     dist = os.path.join(project, "dist")
     os.makedirs(dist, exist_ok=True)

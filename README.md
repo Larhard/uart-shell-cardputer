@@ -8,9 +8,9 @@ A small, fast-booting serial terminal for the **M5Stack Cardputer ADV**. Plug a 
 - Set the baud rate by hand (preset list or any custom rate), or detect it automatically on demand. The detected rate is remembered.
 - Logs to a timestamped file on the SD card, one file per session.
 - Line mode (edit, then send) or raw mode (every key is sent at once).
-- Talks to the Grove UART, or to a USB-serial device plugged into the USB-C port (USB host mode). For example, the CAT port of a (tr)uSDX radio.
+- Talks to the Grove UART, or to a USB-serial device plugged into the USB-C port (USB host mode). For example, the CAT port of a (tr)uSDX or FX-4CR radio.
 - All settings are restored at the next launch, stored in NVS.
-- Works with [Launcher](https://bmorcelli.github.io/Launcher/catalog.html). It's a plain app image of about 470 KB with no data partition.
+- Works with [Launcher](https://bmorcelli.github.io/Launcher/catalog.html). It's a plain app image of about 520 KB with no data partition.
 
 Builds on ideas from [Evil-M5Project](https://github.com/7h30th3r0n3/Evil-M5project) (UART shell) and [UARTerm](https://github.com/Zolibot/UARTerm) (SD logging).
 
@@ -38,6 +38,7 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 | `Fn+U` | Switch the port between the Grove UART and USB host |
 | `Fn+S` | Swap the Grove RX/TX pins |
 | `Fn+D` / `Fn+T` | Turn the USB adapter's DTR / RTS line on or off |
+| `Fn+X` | Apply the FX-4CR CAT preset (see below) |
 | `Fn+R` | Switch between line mode and raw mode |
 | `Fn+N` | Cycle what Enter sends: CR, LF, CRLF or nothing |
 | `Fn+E` | Cycle local echo: hide echo, show all, off |
@@ -75,12 +76,37 @@ The status bar shows `U:CH34x` (or the detected type) when an adapter is connect
 
 **DTR / RTS** start off. Many boards with a USB-serial chip use DTR or RTS to reset the microcontroller. Some radios use them for PTT (transmit) or CW keying, so leave them off unless you know your device needs them. Some CDC devices only send data once DTR is on; use `Fn+D` for those.
 
+### FX-4CR
+
+The BG2FX FX-4CR's USB port has a COM port and a USB sound card behind one cable. According to its manual, the CAT protocol is Kenwood TS-590S at 115200 baud, and PTT is on **RTS**. The device names in the manual suggest a small USB hub inside the radio, with a CH340 and a C-Media sound chip behind it. The app supports hubs and ignores the sound chip.
+
+Press `Fn+X`, or choose *FX-4CR CAT preset* in the settings menu. This sets:
+
+- Port: USB, 115200 baud, 8N1
+- *Enter sends*: none, because CAT commands end with `;`
+- Line mode
+- **DTR and RTS off**, because RTS on keys the transmitter
+
+Then type commands, for example:
+
+| Command | Meaning |
+|---------|---------|
+| `FA;` | Read VFO A frequency, e.g. reply `FA00014074000;` = 14.074 MHz |
+| `FA00007074000;` | Set VFO A to 7.074 MHz |
+| `IF;` | Status (frequency, mode, TX/RX) |
+| `MD;` | Read mode |
+| `ID;` | Radio ID |
+| `AI0;` | Turn off auto-information, so the radio stops sending unrequested status |
+| `TX1;` / `RX;` | Transmit / receive. **This keys the transmitter**; only use it with an antenna or dummy load connected |
+
+Hamlib users report that this radio's CAT link only works without RTS/CTS handshaking, and that `AI1` can interleave unsolicited `TX`/`RX` messages with replies ([Hamlib #2195](https://github.com/Hamlib/Hamlib/issues/2195)).
+
 **For (tr)uSDX CAT control:** set the baud rate to match the radio's CAT setting (115200 is common). Set *Enter sends* to `None` (`Fn+N`), because Kenwood-style CAT commands end with `;`, for example `FA;` or `IF;`. Line mode works well for this.
 
 ### Hardware notes
 
 - **Cable:** you need a USB-C OTG adapter or cable. The Cardputer's port is USB-C, so use C-to-A-female with the device's normal cable, or a direct C-to-whatever OTG cable.
-- **Power:** a USB host normally supplies 5 V to the device. I couldn't confirm that the Cardputer ADV outputs 5 V on its USB-C port; M5Stack documents it only for charging and programming. If the adapter doesn't show up, it probably has no power. Use an **OTG Y-cable with a separate power input**, which feeds 5 V to the device while the data lines go to the Cardputer. USB hubs, powered or not, don't work: the USB host stack in this ESP-IDF version has no hub support.
+- **Power:** a USB host normally supplies 5 V to the device. I couldn't confirm that the Cardputer ADV outputs 5 V on its USB-C port; M5Stack documents it only for charging and programming. If the adapter doesn't show up, it probably has no power. Use an **OTG Y-cable with a separate power input**, which feeds 5 V to the device while the data lines go to the Cardputer. A **self-powered USB hub** between the Cardputer and the device may also work, but some hubs stay off unless the host supplies 5 V.
 - **Flashing:** while USB host mode is active, the USB-C port is no longer the Cardputer's own USB serial/JTAG. To flash over USB, switch the port back to Grove and reboot, or start the board in download mode (hold `G0` while plugging in or resetting). Installing through Launcher from the SD card is not affected.
 - **Startup:** USB host mode starts only when the port is set to USB. In Grove mode, the USB-C port behaves as before.
 
@@ -120,7 +146,7 @@ Log files are saved as `/uart_logs/uart_NNNN.txt`, with a new number each sessio
 
 ## Building
 
-You need [PlatformIO Core](https://platformio.org/install/cli) and Python 3. The first build downloads the ESP32 toolchain (about 1 GB, and can take several minutes).
+You need [PlatformIO Core](https://platformio.org/install/cli) and Python 3. The project uses Arduino-ESP32 3.3 (ESP-IDF 5.5) through the [pioarduino](https://github.com/pioarduino/platform-espressif32) platform, which `pio run` downloads automatically. The first build downloads about 1-2 GB and can take 10-15 minutes. Later builds take under a minute.
 
 ### Windows
 
@@ -129,6 +155,11 @@ You need [PlatformIO Core](https://platformio.org/install/cli) and Python 3. The
 Invoke-WebRequest https://raw.githubusercontent.com/platformio/platformio-core-installer/master/get-platformio.py -OutFile get-platformio.py
 python get-platformio.py
 $env:Path += ";$env:USERPROFILE\.platformio\penv\Scripts"
+
+# The Arduino 3.x packages contain paths longer than Windows' 260-character limit.
+# Either enable long paths (Group Policy "Enable Win32 long paths", needs admin),
+# or keep PlatformIO's packages in a short folder:
+$env:PLATFORMIO_CORE_DIR = "C:\pio"
 
 pio run                         # build
 pio run -t upload               # build and flash over USB
@@ -144,6 +175,8 @@ export PATH="$PATH:$HOME/.platformio/penv/bin"
 pio run
 pio run -t upload
 ```
+
+On Windows, run the build from PowerShell or cmd. Git Bash also works for normal builds, but some ESP-IDF tools refuse to run under MSYS.
 
 On Linux you may need to add yourself to the `dialout` (Debian/Ubuntu) or `uucp` (Arch) group, or install the [PlatformIO udev rules](https://docs.platformio.org/en/latest/core/installation/udev-rules.html), before you can upload.
 
@@ -164,20 +197,20 @@ To make a release:
 
 1. Change `#define APP_VERSION` in `src/main.cpp`.
 2. Run `pio run`. The build log ends with a `dist: ...` line listing the files it created.
-3. Optional: check the image with `esptool.py --chip esp32s3 image_info dist/UART_Shell_v<ver>_CardputerADV.bin`. The checksum and validation hash should both say `valid`.
+3. Optional: check the image with `esptool --chip esp32s3 image-info dist/UART_Shell_v<ver>_CardputerADV.bin`. The checksum and validation hash should both say `valid`.
 4. Attach the two files to a GitHub release. `dist/` isn't tracked by git because `*.bin` is ignored.
 
 To flash the merged image over USB:
 
 ```bash
-esptool.py --chip esp32s3 write_flash 0x0 dist/UART_Shell_v1.0_CardputerADV_merged.bin
+esptool --chip esp32s3 write-flash 0x0 dist/UART_Shell_v1.2_CardputerADV_merged.bin
 ```
 
 The same files also stay in `.pio/build/cardputer-adv/` as `firmware.bin` and `uart_shell_merged.bin`.
 
 ## Using it with Launcher
 
-Copy `dist/UART_Shell_v<ver>_CardputerADV.bin` to the SD card (any folder). On the Cardputer, open Launcher, choose **SD**, select the file and then **Install**. The app doesn't use SPIFFS or FAT partitions, so Launcher only installs the 470 KB app image. Settings are stored in NVS under the `uartshell` namespace, so they survive reinstalls and switching between apps. To get back to Launcher, reset the device or use *Reboot* in the settings menu.
+Copy `dist/UART_Shell_v<ver>_CardputerADV.bin` to the SD card (any folder). On the Cardputer, open Launcher, choose **SD**, select the file and then **Install**. The app doesn't use SPIFFS or FAT partitions, so Launcher only installs the 520 KB app image. Settings are stored in NVS under the `uartshell` namespace, so they survive reinstalls and switching between apps. To get back to Launcher, reset the device or use *Reboot* in the settings menu.
 
 ## Project layout
 
@@ -197,5 +230,6 @@ tools/merge_bin.py post-build step that creates the merged image and dist/ packa
 
 - Supports the Cardputer **ADV** only (the TCA8418 keyboard). The original Cardputer uses a GPIO keyboard matrix and is not supported.
 - ANSI escape sequences (colors, cursor movement) are removed, not interpreted. Full-screen programs like `vi` or `top` won't display correctly.
-- USB host mode supports one adapter at a time, plugged in directly (no hubs). On multi-port chips, only the first port is used.
+- USB host mode uses one serial adapter at a time. Other devices behind a hub, such as a radio's sound chip, are ignored. On multi-port chips, only the first port is used.
+- The USB-serial support is written from the chip vendors' and Linux drivers' documented behavior. The FX-4CR USB layout (a hub with a CH340 inside) is inferred from its manual, not checked against the radio.
 - Baud detection needs the target to send text. It can't detect binary protocols, so set the rate by hand for those.

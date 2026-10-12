@@ -8,7 +8,7 @@
 #include "term.h"
 #include "usbserial.h"
 
-#define APP_VERSION "1.1"
+#define APP_VERSION "1.2"
 
 using kbd::Key;
 
@@ -532,11 +532,11 @@ static void drawStatus(bool force) {
 // Settings menu
 // ---------------------------------------------------------------------------
 enum MenuItem { MI_PORT, MI_BAUD, MI_FRAME, MI_PINS, MI_LINES, MI_INPUT, MI_EOL, MI_ECHO, MI_LOG,
-                MI_TS, MI_BRIGHT, MI_CLEAR, MI_REBOOT, MI_COUNT };
+                MI_TS, MI_BRIGHT, MI_PRESET, MI_CLEAR, MI_REBOOT, MI_COUNT };
 static const char *MENU_LABELS[] = {"Port", "Baud rate", "Data/parity/stop", "Grove pins",
                                     "USB DTR / RTS", "Input mode", "Enter sends", "Local echo",
-                                    "SD logging", "Log timestamps", "Brightness", "Clear screen",
-                                    "Reboot (Launcher)"};
+                                    "SD logging", "Log timestamps", "Brightness",
+                                    "FX-4CR CAT preset", "Clear screen", "Reboot (Launcher)"};
 constexpr int MENU_ROWS = 11;
 static int menuSel = 0, menuTop = 0;
 static char baudEdit[9];
@@ -606,6 +606,23 @@ static void startLog() {
   }
 }
 
+// FX-4CR (and other Kenwood TS-590S style CAT radios) over USB: 115200 8N1, commands end
+// with ';' so Enter adds nothing, DTR/RTS off because RTS keys PTT on the FX-4CR.
+static void applyRadioPreset() {
+  cfg.port = PORT_USB;
+  cfg.autoBaud = 0;
+  cfg.baud = 115200;
+  cfg.frame = 0;
+  cfg.eol = EOL_NONE;
+  cfg.rawMode = 0;
+  cfg.dtr = cfg.rts = 0;
+  scan.on = false;
+  linkBegin();
+  logConfigNote();
+  info("[preset] FX-4CR CAT: USB 115200 8N1, Enter adds nothing");
+  info("try FA; (freq) IF; (status) ID; (model)");
+}
+
 static void setManualBaud(uint32_t b) {
   if (scan.on) scan.on = false;
   cfg.autoBaud = 0;
@@ -666,6 +683,7 @@ static void changeItem(int item, int dir) {
       lcd.setBrightness(cfg.brightness);
       break;
     }
+    case MI_PRESET: applyRadioPreset(); break;
     case MI_CLEAR: term::clear(); follow = true; break;
     case MI_REBOOT:
       sdlog::stop();
@@ -692,6 +710,7 @@ static void showHelp() {
   info("Opt settings  Fn+B detect baud");
   info("Fn+[ ] baud -/+  Fn+F frame  Fn+S swap");
   info("Fn+U Grove/USB  Fn+D DTR  Fn+T RTS");
+  info("Fn+X FX-4CR CAT preset");
   info("Fn+R raw/line  Fn+N enter  Fn+E echo");
   info("Fn+L SD log  Fn+C clear  Fn+- = bright");
   info("Fn+; . line  Fn+, / page  Fn+Ent end");
@@ -708,6 +727,7 @@ static bool shortcut(uint8_t base) {
     case '[': quickBaud(-1); return true;
     case ']': quickBaud(1); return true;
     case 'h': showHelp(); return true;
+    case 'x': applyRadioPreset(); settingsSave(); needFull = true; inputDirty = true; return true;
     case 'f': item = MI_FRAME; break;
     case 's': item = MI_PINS; break;
     case 'r': item = MI_INPUT; break;
@@ -770,7 +790,7 @@ static void menuKey(const Key &k) {
     menuSel = (menuSel + 1) % MI_COUNT;
   } else if (c == '/' || c == kbd::K_RIGHT || c == kbd::K_ENTER || c == ' ') {
     changeItem(menuSel, 1);
-    if (menuSel == MI_CLEAR) return closeMenu();
+    if (menuSel == MI_CLEAR || menuSel == MI_PRESET) return closeMenu();
   } else if (c == ',' || c == kbd::K_LEFT) {
     changeItem(menuSel, -1);
   } else {
