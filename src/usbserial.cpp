@@ -47,6 +47,15 @@ void logf(const char *fmt, ...) {
 // ESP-IDF's own USB host messages (enumeration, hub, controller errors) are copied into
 // the terminal log; everything else goes to the previous log output unchanged.
 vprintf_like_t prevVprintf = nullptr;
+volatile bool hubPortError = false;  // ESP-IDF reported a failed reset on a hub port
+
+// Re-enumeration when a hub appears without any serial port behind it. Hubs are handled
+// by ESP-IDF's own hub driver and never reach this client, so the enumeration filter
+// records when one shows up.
+volatile uint32_t hubSeenMs = 0;  // when the last hub was enumerated (0 = none pending)
+uint32_t powerOnAtMs = 0;         // root port is off; turn it back on at this time (0 = on)
+uint8_t reenumTries = 0;
+constexpr uint8_t REENUM_MAX = 3;
 
 int idfLog(const char *fmt, va_list ap) {
   static const char *TAGS[] = {"ENUM", "USBH", "HUB", "EXT_HUB", "EXT_PORT", "HCD", "USB HOST", "usb_phy"};
@@ -74,6 +83,7 @@ int idfLog(const char *fmt, va_list ap) {
     }
     out[n] = 0;
     logf("idf %s", out);
+    if (strstr(out, "port reset") || strstr(out, "Error on port")) hubPortError = true;
   }
   return prevVprintf ? prevVprintf(fmt, ap) : 0;
 }
@@ -94,12 +104,16 @@ bool enumFilter(const usb_device_desc_t *dd, uint8_t *) {
       0x1b3f,  // Generalplus audio
       0x0c76,  // JMTek audio
       0x262a,  // SAVITECH audio
+      0x0a12,  // Cambridge Silicon Radio (Bluetooth modules, e.g. inside the FX-4CR)
   };
   uint8_t cls = dd->bDeviceClass;
   bool reject = cls == 0x01 || cls == 0x03 || cls == 0x08 || cls == 0x0E || cls == 0xE0;
   for (uint16_t v : NON_SERIAL_VIDS)
     if (dd->idVendor == v) reject = true;
-  if (cls == 0x09) reject = false;  // hubs are always needed
+  if (cls == 0x09) {  // hubs are always needed
+    reject = false;
+    hubSeenMs = millis() | 1;
+  }
   logf("enum %04x:%04x class %02x%s", dd->idVendor, dd->idProduct, cls,
        reject ? " - not serial, released" : "");
   return !reject;
@@ -123,6 +137,7 @@ Port ports[MAX_PORTS];
 bool portFailed[MAX_PORTS];  // claim failed; not retried until devices change or user picks it
 int devCount = 0, portCnt = 0, active = -1;
 PortId pref = {0, 0, 0, 0};
+
 
 // The active port, as used by the transfer and chip code below.
 usb_device_handle_t dev = nullptr;
@@ -539,6 +554,14 @@ bool removeDevice(usb_device_handle_t h) {
   return wasActive;
 }
 
+void startReenumerate() {
+  logf("re-enumerating USB (%u/%u)", reenumTries, REENUM_MAX);
+  hubPortError = false;
+  hubSeenMs = 0;
+  usb_host_lib_set_root_port_power(false);  // all devices detach, DEV_GONE closes ours
+  powerOnAtMs = millis() + 600;
+}
+
 int bestPort() {
   int best = -1, score = -1;
   for (int i = 0; i < portCnt; i++) {
@@ -592,6 +615,12 @@ void begin() {
   xTaskCreatePinnedToCore(clientTask, "usbc", 4096, nullptr, 2, nullptr, 0);
   installed = true;
   logf("host started, waiting for a device");
+}
+
+void reenumerate() {
+  if (!installed || powerOnAtMs) return;
+  reenumTries = 0;
+  startReenumerate();
 }
 
 bool connected() { return ready; }
@@ -681,13 +710,30 @@ Event poll() {
   if (added || removed)  // channels may have been freed: retry failed ports
     for (int i = 0; i < MAX_PORTS; i++) portFailed[i] = false;
 
+  uint32_t now = millis();
+  if (powerOnAtMs && (int32_t)(now - powerOnAtMs) >= 0) {
+    powerOnAtMs = 0;
+    usb_host_lib_set_root_port_power(true);
+  } else if (!powerOnAtMs && portCnt == 0 && hubSeenMs && reenumTries < REENUM_MAX) {
+    // A hub port reset failed, or nothing serial appeared behind the hub in time.
+    uint32_t waited = now - hubSeenMs;
+    if ((hubPortError && waited > 1500) || waited > 5000) {
+      reenumTries++;
+      startReenumerate();
+    }
+  }
+
   // Connect when nothing is active, or switch when the preferred port just appeared.
   int want = bestPort();
   bool switchToPref = added && ready && want >= 0 && want != active && prefScore(want) == 3 &&
                       prefScore(active) < 3;
   if (want >= 0 && (!ready || switchToPref)) {
     deactivate();
-    if (activate(want)) ev = EV_CONNECTED;
+    if (activate(want)) {
+      ev = EV_CONNECTED;
+      reenumTries = 0;
+      hubSeenMs = 0;
+    }
   }
   return ev;
 }

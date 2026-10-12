@@ -747,6 +747,7 @@ static void showHelp() {
   info("Fn+U Grove/USB  Fn+P next USB port");
   info("Fn+D DTR  Fn+T RTS");
   info("Fn+X FX-4CR CAT preset  Fn+I USB info");
+  info("Fn+Z re-enumerate USB");
   info("Fn+R raw/line  Fn+N enter  Fn+E echo");
   info("Fn+L SD log  Fn+C clear  Fn+- = bright");
   info("Fn+; . line  Fn+, / page  Fn+Ent end");
@@ -766,6 +767,10 @@ static bool shortcut(uint8_t base) {
     case 'i':
       if (!usbPort()) info("[usb] port is Grove; Fn+U switches to USB");
       else usbserial::report();
+      return true;
+    case 'z':
+      if (!usbPort()) info("[usb] port is Grove; Fn+U switches to USB");
+      else usbserial::reenumerate();
       return true;
     case 'x': applyRadioPreset(); settingsSave(); needFull = true; inputDirty = true; return true;
     case 'f': item = MI_FRAME; break;

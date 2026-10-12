@@ -41,6 +41,7 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 | `Fn+P` | Switch to the next USB serial port, when several are attached |
 | `Fn+X` | Apply the FX-4CR CAT preset (see below) |
 | `Fn+I` | USB diagnostics: host state and every device on the bus |
+| `Fn+Z` | Re-enumerate the USB bus (power-cycles the Cardputer's USB port) |
 | `Fn+R` | Switch between line mode and raw mode |
 | `Fn+N` | Cycle what Enter sends: CR, LF, CRLF or nothing |
 | `Fn+E` | Cycle local echo: hide echo, show all, off |
@@ -91,7 +92,9 @@ The port you choose is saved. At the next launch, or when the device is plugged 
 
 ### FX-4CR
 
-The BG2FX FX-4CR's USB port has a COM port and a USB sound card behind one cable. According to its manual, the CAT protocol is Kenwood TS-590S at 115200 baud, and PTT is on **RTS**. The device names in the manual suggest a small USB hub inside the radio, with a CH340 and a C-Media sound chip behind it. The app supports hubs and ignores the sound chip.
+The BG2FX FX-4CR's USB port has a COM port and a USB sound card behind one cable. According to its manual, the CAT protocol is Kenwood TS-590S at 115200 baud, and PTT is on **RTS**. Inside, the radio has a USB hub (Terminus FE1.1s, `1a40:0801`) with three devices behind it: a C-Media sound chip (`0d8c:013c`), the CH340 CAT port (`1a86:7523`) and a CSR Bluetooth module (`0a12:4007`). The app keeps the sound chip and the Bluetooth module off the bus, so the S3's few USB host channels are left for the CH340.
+
+When the radio is plugged in, the hub sometimes fails to reset one of its ports, and ESP-IDF doesn't retry that. If the hub appears but no serial port shows up, the app re-enumerates the bus automatically, up to 3 times. `Fn+Z` does the same by hand.
 
 Press `Fn+X`, or choose *FX-4CR CAT preset* in the settings menu. This sets:
 

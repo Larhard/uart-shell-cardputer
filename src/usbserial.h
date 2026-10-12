@@ -40,7 +40,12 @@ void flushInput();
 enum Event { EV_NONE, EV_CONNECTED, EV_DISCONNECTED };
 
 // Call from loop(): handles attached/removed devices and (re)connects the active port.
+// If a hub appears but no serial port shows up behind it (e.g. a hub port reset failed),
+// the bus is re-enumerated automatically a few times.
 Event poll();
+
+// Power-cycle the USB port so every device enumerates again.
+void reenumerate();
 
 // Diagnostic messages (host start-up, attached devices, setup errors) for the terminal.
 bool nextLog(char *out, size_t n);
