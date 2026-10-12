@@ -89,34 +89,78 @@ int idfLog(const char *fmt, va_list ap) {
 }
 
 // Called by ESP-IDF in the middle of enumeration, right after the device descriptor was
-// read. Used only to report progress: if this line never shows up, enumeration stalls
-// before (reset/address); if it shows up but the device never attaches, after it
-// (configuration or string descriptors).
-//
-// It also turns away devices that can never be a serial port (sound chips, HID, storage).
-// The S3's USB controller has only 8 host channels and every enumerated device keeps one
-// for its control endpoint, so e.g. a radio's built-in sound card would otherwise leave
-// too few channels to open the serial chip. Rejected devices are released by ESP-IDF.
+// read. Used to report progress and to notice hubs (ESP-IDF's hub driver keeps hubs away
+// from clients). It never rejects a device: in ESP-IDF 5.5 a rejection skips the
+// "enumeration canceled" event, the hub port stays marked as enumerating and the hub
+// stops enumerating its other ports. Unwanted devices are pruned afterwards instead.
 bool enumFilter(const usb_device_desc_t *dd, uint8_t *) {
-  static const uint16_t NON_SERIAL_VIDS[] = {
-      0x0d8c,  // C-Media (USB sound chips, "USB PnP Sound Device")
-      0x08bb,  // Texas Instruments PCM29xx audio codecs
-      0x1b3f,  // Generalplus audio
-      0x0c76,  // JMTek audio
-      0x262a,  // SAVITECH audio
-      0x0a12,  // Cambridge Silicon Radio: Bluetooth modules and their built-in hub
-               // (FX-4CR: hub 0a12:4010 with the Bluetooth device 0a12:4007 behind it)
-  };
-  uint8_t cls = dd->bDeviceClass;
-  bool reject = cls == 0x01 || cls == 0x03 || cls == 0x08 || cls == 0x0E || cls == 0xE0;
-  if (cls == 0x09) reject = false;  // generic hubs are needed to reach serial chips
-  // Vendors listed above never carry a serial port, not even behind their own hubs.
+  if (dd->bDeviceClass == 0x09) hubSeenMs = millis() | 1;
+  logf("enum %04x:%04x class %02x", dd->idVendor, dd->idProduct, dd->bDeviceClass);
+  return true;
+}
+
+// Vendors whose chips never carry a serial port, not even behind their own hubs.
+const uint16_t NON_SERIAL_VIDS[] = {
+    0x0d8c,  // C-Media (USB sound chips, "USB PnP Sound Device")
+    0x08bb,  // Texas Instruments PCM29xx audio codecs
+    0x1b3f,  // Generalplus audio
+    0x0c76,  // JMTek audio
+    0x262a,  // SAVITECH audio
+    0x0a12,  // Cambridge Silicon Radio: audio/Bluetooth chips and their built-in hub
+             // (FX-4CR: hub 0a12:4010 with an audio device 0a12:4007 behind it)
+};
+
+bool nonSerialVid(uint16_t vid) {
   for (uint16_t v : NON_SERIAL_VIDS)
-    if (dd->idVendor == v) reject = true;
-  if (cls == 0x09 && !reject) hubSeenMs = millis() | 1;
-  logf("enum %04x:%04x class %02x%s", dd->idVendor, dd->idProduct, cls,
-       reject ? " - not serial, released" : "");
-  return !reject;
+    if (vid == v) return true;
+  return false;
+}
+
+// Pruning: the S3's USB controller has only 8 host channels and every enumerated device
+// keeps one for its control endpoint (hubs one more for status). Devices without a serial
+// port (a radio's sound chips, HID) are switched off at their hub port once enumeration
+// has settled, which frees their channels for the serial chip.
+extern "C" esp_err_t hub_port_disable(usb_device_handle_t parent_dev_hdl, uint8_t parent_port_num);
+
+struct Prune {
+  usb_device_handle_t parent;
+  uint8_t port;
+};
+Prune prunes[8];
+int pruneCount = 0;
+uint32_t lastNewDevMs = 0;   // enumeration is considered settled some time after this
+bool pruneDone = false;      // prunes executed; retry failed ports shortly after
+uint32_t prunedAtMs = 0;
+
+void queuePrune(usb_device_handle_t h) {
+  usb_device_info_t info;
+  if (usb_host_device_info(h, &info) != ESP_OK || !info.parent.dev_hdl) return;  // root port: leave it
+  usb_device_handle_t parent = info.parent.dev_hdl;
+  uint8_t port = info.parent.port_num;
+  // Behind a hub that belongs to a non-serial chip (e.g. CSR)? Switch off that whole hub.
+  for (int depth = 0; depth < 4; depth++) {
+    const usb_device_desc_t *pd;
+    usb_device_info_t pinfo;
+    if (usb_host_get_device_descriptor(parent, &pd) != ESP_OK || !nonSerialVid(pd->idVendor)) break;
+    if (usb_host_device_info(parent, &pinfo) != ESP_OK || !pinfo.parent.dev_hdl) break;
+    port = pinfo.parent.port_num;
+    parent = pinfo.parent.dev_hdl;
+  }
+  for (int i = 0; i < pruneCount; i++)
+    if (prunes[i].parent == parent && prunes[i].port == port) return;
+  if (pruneCount < 8) prunes[pruneCount++] = {parent, port};
+}
+
+void runPrunes() {
+  for (int i = 0; i < pruneCount; i++) {
+    esp_err_t err = hub_port_disable(prunes[i].parent, prunes[i].port);
+    if (err == ESP_OK) logf("switched off hub port %u (no serial port there)", prunes[i].port);
+  }
+  if (pruneCount) {
+    pruneDone = true;
+    prunedAtMs = millis();
+  }
+  pruneCount = 0;
 }
 
 // Attached devices that have at least one serial port. They stay open so that the
@@ -511,6 +555,7 @@ void scanDevice(uint8_t addr) {
 
   if (!found) {
     logf("%04x:%04x %s, skipped", d.vid, d.pid, isHub ? "hub" : "no serial port");
+    if (!isHub) queuePrune(h);
     usb_host_device_close(client, h);
     return;
   }
@@ -588,6 +633,11 @@ void begin() {
   usb_host_config_t hc = {};
   hc.skip_phy_setup = false;
   hc.intr_flags = ESP_INTR_FLAG_LEVEL1;
+  // The Arduino build biases the FIFO towards periodic OUT, which serial ports and hubs
+  // don't use. This split (known to work with the FX-4CR's hub) favours IN traffic.
+  hc.fifo_settings_custom.rx_fifo_lines = 91;
+  hc.fifo_settings_custom.nptx_fifo_lines = 18;
+  hc.fifo_settings_custom.ptx_fifo_lines = 91;
 #ifdef CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
   hc.enum_filter_cb = enumFilter;
 #endif
@@ -706,6 +756,7 @@ Event poll() {
   while (xQueueReceive(newDevs, &addr, 0) == pdTRUE) {
     scanDevice(addr);
     added = true;
+    lastNewDevMs = millis();
   }
   if (added || removed)  // channels may have been freed: retry failed ports
     for (int i = 0; i < MAX_PORTS; i++) portFailed[i] = false;
@@ -727,6 +778,16 @@ Event poll() {
       }
     }
   }
+
+  // Let enumeration settle (devices behind a hub arrive one by one), then switch off
+  // non-serial devices so their host channels are free before the serial port opens.
+  bool settled = now - lastNewDevMs > 1500 && (!hubSeenMs || now - hubSeenMs > 1500);
+  if (settled && pruneCount) runPrunes();
+  if (pruneDone && now - prunedAtMs > 500) {
+    pruneDone = false;
+    for (int i = 0; i < MAX_PORTS; i++) portFailed[i] = false;  // channels were freed
+  }
+  if (!settled || pruneCount || pruneDone) return ev;
 
   // Connect when nothing is active, or switch when the preferred port just appeared.
   int want = bestPort();

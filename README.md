@@ -92,7 +92,7 @@ The port you choose is saved. At the next launch, or when the device is plugged 
 
 ### FX-4CR
 
-The BG2FX FX-4CR's USB port has a COM port and a USB sound card behind one cable. According to its manual, the CAT protocol is Kenwood TS-590S at 115200 baud, and PTT is on **RTS**. Inside, the radio has a USB hub (Terminus FE1.1s, `1a40:0801`) with three devices behind it: a C-Media sound chip (`0d8c:013c`), the CH340 CAT port (`1a86:7523`) and a CSR Bluetooth module (`0a12:4007`). The CSR chip is itself a small hub (`0a12:4010`) with the Bluetooth device behind it. The app keeps the sound chip and the whole CSR branch off the bus, so the S3's few USB host channels are left for the CH340.
+The BG2FX FX-4CR's USB port has a COM port and a USB sound card behind one cable. According to its manual, the CAT protocol is Kenwood TS-590S at 115200 baud, and PTT is on **RTS**. Inside, the radio has a USB hub (Terminus FE1.1s, `1a40:0801`) with three devices behind it: a C-Media sound chip (`0d8c:013c`), the CH340 CAT port (`1a86:7523`) and a CSR chip that is itself a small hub (`0a12:4010`) with a second audio device behind it (`0a12:4007`). The ESP32-S3 has too few USB host channels to keep all of these open and still open the CH340. Once enumeration has settled, the app switches off the hub ports of the sound chip and the whole CSR branch, then opens the CH340.
 
 When the radio is plugged in, the hub sometimes fails to reset one of its ports, and ESP-IDF doesn't retry that. If the hub appears but no serial port shows up, the app re-enumerates the bus automatically, up to 3 times. `Fn+Z` does the same by hand.
 
@@ -247,6 +247,6 @@ tools/merge_bin.py post-build step that creates the merged image and dist/ packa
 - Supports the Cardputer **ADV** only (the TCA8418 keyboard). The original Cardputer uses a GPIO keyboard matrix and is not supported.
 - ANSI escape sequences (colors, cursor movement) are removed, not interpreted. Full-screen programs like `vi` or `top` won't display correctly.
 - USB host mode has one active serial port at a time (switch with `Fn+P`). Up to 6 devices and 8 serial ports are tracked.
-- The ESP32-S3 USB controller has only 8 host channels. Every attached device uses one, a hub uses one more, and an open serial port uses 2-3. To leave room for the serial chip, USB sound chips, HID and storage devices are released during enumeration. If you still see "no free USB host channels", unplug other devices from the hub.
+- The ESP32-S3 USB controller has only 8 host channels. Every attached device uses one, a hub uses one more, and an open serial port uses 2-3. To leave room for the serial chip, devices without a serial port (sound chips, HID) are switched off at their hub port after enumeration. This only works for devices behind a hub, not for one plugged in directly. If you still see "no free USB host channels", unplug other devices from the hub.
 - The USB-serial support is written from the chip vendors' and Linux drivers' documented behavior. The FX-4CR USB layout (a hub with a CH340 inside) is inferred from its manual, not checked against the radio.
 - Baud detection needs the target to send text. It can't detect binary protocols, so set the rate by hand for those.
