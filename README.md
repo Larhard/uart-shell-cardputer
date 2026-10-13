@@ -68,7 +68,7 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 
 ## Presets
 
-`Fn+X` (or *Preset* in the settings menu) opens the preset picker: first a list of groups, then the presets in a group. `;` / `.` move, Enter applies, `,` or `` ` `` goes back, and typing a letter jumps to the next entry that starts with it. The bottom line shows a note for the selected preset (wiring, voltage levels, example commands); the note is also printed when the preset is applied.
+`Fn+X` (or *Preset* in the settings menu) opens the preset picker: first a list of groups, then the presets in a group. `;` / `.` move, Enter applies, `,` or `` ` `` goes back, and typing a letter jumps to the next entry that starts with it. The bottom line shows the selected preset's settings in short, for example `9600 8N1 CR raw`. Press `i` for its info page: a description (wiring, voltage levels, example commands) followed by every value the preset sets. Scroll with `;` / `.` when it doesn't fit; markers on the right show there's more above or below. Enter applies the preset from the info page, and `` ` `` or `i` goes back. The description is also printed in the terminal when the preset is applied, wrapped at word boundaries.
 
 A preset sets the baud rate, data format, what Enter sends, line/raw input, echo, DTR/RTS, hex mode and flow control. Presets for devices that only have a USB port (the FX-4CR) also switch the port to USB. Pins, logging and brightness are left alone.
 

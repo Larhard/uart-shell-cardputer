@@ -24,7 +24,7 @@ struct Preset {
   uint8_t dtr, rts;
   uint8_t hex, flow;
   uint8_t port;       // PortSel
-  const char *note;   // shown when applied (wiring, levels, example commands); may be null
+  const char *note;   // wiring, levels, example commands (info page, printed when applied)
 };
 
 struct Group {
@@ -41,7 +41,7 @@ constexpr int USER_MAX = 16;
 struct UserPreset {
   char name[24];
   char shortName[PRESET_NAME_LEN];
-  char note[48];
+  char note[160];
   Preset p;  // name/shortName/note point into the fields above
 };
 

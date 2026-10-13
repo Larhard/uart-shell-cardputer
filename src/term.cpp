@@ -37,12 +37,20 @@ void info(const char *s) {
   if (curMut().len) newline();
   size_t n = strlen(s);
   do {
+    // Wrap at the last space that fits; a single word longer than a line is split.
+    size_t take = n;
+    if (n > (size_t)COLS) {
+      take = COLS;
+      while (take && s[take] != ' ') take--;
+      if (!take) take = COLS;
+    }
     Line &l = curMut();
     l.info = 1;
-    l.len = n > (size_t)COLS ? COLS : n;
-    memcpy(l.c, s, l.len);
-    s += l.len;
-    n -= l.len;
+    l.len = take;
+    memcpy(l.c, s, take);
+    s += take;
+    n -= take;
+    while (n && *s == ' ') s++, n--;
     newline();
   } while (n);
 }

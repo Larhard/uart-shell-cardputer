@@ -940,6 +940,14 @@ static const char *pickLabel(int i) {
   return p ? p->name : "+ Save current settings";
 }
 
+// e.g. "9600 8N1 CR raw" - short enough for the picker's bottom line.
+static const char *presetLine(const presets::Preset &p) {
+  static char out[40];
+  snprintf(out, sizeof out, "%lu %s %s %s", (unsigned long)p.baud, FRAMES[p.frame].name,
+           p.hex ? "HEX" : EOL_NAMES[p.eol], p.raw ? "raw" : "line");
+  return out;
+}
+
 static void presetSummary(const presets::Preset &p, char *out, size_t sz) {
   snprintf(out, sz, "%lu%s%s %s", (unsigned long)p.baud, p.frame ? " " : "", p.frame ? FRAMES[p.frame].name : "",
            p.hex ? "HEX" : EOL_NAMES[p.eol]);
@@ -978,20 +986,114 @@ static void drawPicker() {
     lcd.setTextColor(sel ? C_TX : C_RX);
     lcd.drawString(right, W - 4 - strlen(right) * CW, y);
   }
-  // Bottom line: what the selected preset is about, or the keys.
+  // Bottom line: a summary that always fits; the full text is on the info page (i).
   char hint[48];
   const presets::Preset *p = pickLevel ? pickItem(pickSel) : nullptr;
   if (pickLevel && pickGroup == USER_GROUP && userCount == -1)
     snprintf(hint, sizeof hint, "No SD card: user presets need one");
   else if (naming)
     snprintf(hint, sizeof hint, "Enter save  ` cancel");
-  else if (p && p->note)
-    snprintf(hint, sizeof hint, "%.39s", p->note);
+  else if (p)
+    snprintf(hint, sizeof hint, "%s  i: info", presetLine(*p));
+  else if (pickLevel)
+    snprintf(hint, sizeof hint, "Enter: name and save current settings");
   else
-    snprintf(hint, sizeof hint, "; . select  Enter apply  , back");
+    snprintf(hint, sizeof hint, "; . select  Enter open  ` close");
   lcd.setTextColor(C_DIM);
   lcd.drawString(hint, 2, H - 9);
   lcd.endWrite();
+}
+
+// Info page (i in the picker): every value of the preset plus its note, word-wrapped,
+// scrolled with ; and . when it doesn't fit.
+static bool pickInfo = false;
+static int infoTop = 0, infoCount = 0;
+static const char *infoTitle = "";
+constexpr int INFO_MAX = 32;
+static char infoLines[INFO_MAX][term::COLS + 1];
+static bool infoKv[INFO_MAX];  // "Label     value" row
+
+static void infoAdd(const char *fmt, ...) {
+  if (infoCount >= INFO_MAX) return;
+  va_list ap;
+  va_start(ap, fmt);
+  infoKv[infoCount] = false;
+  vsnprintf(infoLines[infoCount++], term::COLS + 1, fmt, ap);
+  va_end(ap);
+}
+
+// Word-wraps text into the info lines.
+static void infoWrap(const char *text) {
+  const int width = term::COLS - 3;  // leaves room for the scroll markers
+  while (*text && infoCount < INFO_MAX) {
+    while (*text == ' ') text++;
+    int take = strlen(text);
+    if (take > width) {
+      take = width;
+      while (take && text[take] != ' ') take--;
+      if (!take) take = width;  // one long word
+    }
+    infoAdd("%.*s", take, text);
+    text += take;
+  }
+}
+
+static void drawInfo() {
+  constexpr int ROWS = MENU_ROWS;
+  lcd.startWrite();
+  lcd.fillScreen(C_BG);
+  lcd.fillRect(0, 0, W, STATUS_H, C_BAR);
+  lcd.setTextColor(C_TEXT);
+  char title[term::COLS + 1];
+  snprintf(title, sizeof title, "%s", infoTitle);
+  lcd.drawString(title, 2, 1);
+  for (int i = 0; i < ROWS && infoTop + i < infoCount; i++) {
+    const char *l = infoLines[infoTop + i];
+    // "Label     value" rows: label dim, value bright; wrapped note text in one color.
+    bool kv = infoKv[infoTop + i];
+    int y = 12 + i * 10;
+    if (kv) {
+      char label[11];
+      snprintf(label, sizeof label, "%.10s", l);
+      lcd.setTextColor(C_DIM);
+      lcd.drawString(label, 4, y);
+      lcd.setTextColor(C_RX);
+      lcd.drawString(l + 10, 4 + 10 * CW, y);
+    } else {
+      lcd.setTextColor(C_TEXT);
+      lcd.drawString(l, 4, y);
+    }
+  }
+  // Scroll markers instead of moving text.
+  if (infoTop > 0) lcd.fillTriangle(W - 7, 17, W - 2, 17, W - 5, 13, C_TX);
+  if (infoTop + ROWS < infoCount) lcd.fillTriangle(W - 7, 114, W - 2, 114, W - 5, 118, C_TX);
+  lcd.setTextColor(C_DIM);
+  lcd.drawString(infoCount > ROWS ? "; . scroll  ` back  Enter apply" : "` back  Enter apply", 2, H - 9);
+  lcd.endWrite();
+}
+
+static void openInfo(const presets::Preset &p) {
+  static const char *PORTS[] = {"keep current", "Grove", "USB"};
+  infoCount = infoTop = 0;
+  infoTitle = p.name;
+  // The description first, then every value the preset sets.
+  if (p.note && *p.note) {
+    infoWrap(p.note);
+    infoAdd("");
+  }
+  int firstKv = infoCount;
+  infoAdd("Baud      %lu", (unsigned long)p.baud);
+  infoAdd("Format    %s", FRAMES[p.frame].name);
+  infoAdd("Enter     %s", p.hex ? "nothing (hex mode)" : EOL_NAMES[p.eol]);
+  infoAdd("Input     %s", p.raw ? "raw keys" : "line");
+  infoAdd("Echo      %s", ECHO_NAMES[p.echo % ECHO_COUNT]);
+  infoAdd("DTR/RTS   %s / %s", p.dtr ? "on" : "off", p.rts ? "on" : "off");
+  infoAdd("Hex mode  %s", p.hex ? "on" : "off");
+  infoAdd("Flow      %s", p.flow ? "RTS/CTS" : "none");
+  infoAdd("Port      %s", PORTS[p.port % 3]);
+  for (int i = firstKv; i < infoCount; i++) infoKv[i] = true;
+  pickInfo = true;
+  drawInfo();
 }
 
 static void openPicker() {
@@ -1050,9 +1152,42 @@ static void saveCurrentAs(const char *name) {
   info("[preset] saved \"%s\" to /uart_presets.txt", name);
 }
 
+static void applyPreset(const presets::Preset &p);
+static void closePicker();
+
+static void infoKey(const Key &k) {
+  uint8_t c = k.code;
+  if (c == ';' || c == kbd::K_UP) {
+    if (infoTop > 0) infoTop--;
+  } else if (c == '.' || c == kbd::K_DOWN) {
+    if (infoTop + MENU_ROWS < infoCount) infoTop++;
+  } else if (c == kbd::K_ENTER) {  // apply right from the info page
+    pickInfo = false;
+    if (const presets::Preset *p = pickItem(pickSel)) {
+      closePicker();
+      applyPreset(*p);
+    }
+    return;
+  } else if (c == kbd::K_OPT) {
+    pickInfo = false;
+    return closePicker();
+  } else if (c == ',' || c == kbd::K_LEFT || c == kbd::K_BKSP || c == '`' || c == kbd::K_ESC ||
+             c == 'i' || c == 'I') {
+    pickInfo = false;
+    return drawPicker();
+  } else {
+    return;
+  }
+  drawInfo();
+}
+
 static void pickerKey(const Key &k) {
   uint8_t c = k.code;
   int n = pickCount();
+  if (pickInfo) return infoKey(k);
+  if (!naming && (c == 'i' || c == 'I') && pickLevel) {
+    if (const presets::Preset *p = pickItem(pickSel)) return openInfo(*p);
+  }
   if (naming) {
     if (c == kbd::K_ENTER && nameLen) {
       naming = false;
