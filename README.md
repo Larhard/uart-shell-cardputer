@@ -316,7 +316,7 @@ tools/merge_bin.py post-build step that creates the merged image and dist/ packa
 
 ## License
 
-[MIT](LICENSE). The firmware binary also contains third-party code under its own licenses:
+[MIT](LICENSE). The firmware binary also contains third-party code under its own licenses; [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists everything linked into it, with copyright notices and full license texts:
 
 | Component | License |
 |-----------|---------|
