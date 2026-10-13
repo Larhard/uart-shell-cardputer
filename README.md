@@ -313,3 +313,13 @@ tools/merge_bin.py post-build step that creates the merged image and dist/ packa
 - The ESP32-S3 USB controller has only 8 host channels. Every attached device uses one, a hub uses one more, and an open serial port uses 2-3. To leave room for the serial chip, devices without a serial port (sound chips, HID) are switched off at their hub port after enumeration. This only works for devices behind a hub, not for one plugged in directly. If you still see "no free USB host channels", unplug other devices from the hub.
 - The USB-serial support is written from the chip vendors' and Linux drivers' documented behavior. The FX-4CR USB layout (a hub with a CH340 inside) is inferred from its manual, not checked against the radio.
 - Baud detection needs the target to send text. It can't detect binary protocols, so set the rate by hand for those.
+
+## License
+
+[MIT](LICENSE). The firmware binary also contains third-party code under its own licenses:
+
+| Component | License |
+|-----------|---------|
+| [Arduino-ESP32](https://github.com/espressif/arduino-esp32) core | LGPL-2.1 |
+| [ESP-IDF](https://github.com/espressif/esp-idf) (incl. the USB host stack) | Apache-2.0 |
+| [LovyanGFX](https://github.com/lovyan03/LovyanGFX) | FreeBSD (BSD-2-Clause) |
