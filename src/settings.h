@@ -3,6 +3,9 @@
 
 enum Eol : uint8_t { EOL_CR, EOL_LF, EOL_CRLF, EOL_NONE, EOL_COUNT };
 enum Port : uint8_t { PORT_GROVE, PORT_USB };
+enum EchoMode : uint8_t { ECHO_OFF, ECHO_HIDE, ECHO_SHOW, ECHO_COUNT };
+
+constexpr int PRESET_NAME_LEN = 12;  // short name shown in the status bar, incl. NUL
 
 struct Settings {
   uint32_t baud = 115200;
@@ -23,6 +26,10 @@ struct Settings {
   // Preferred USB serial port (0 = none chosen yet): chip IDs, interface, hub port.
   uint16_t usbVid = 0, usbPid = 0;
   uint8_t usbIface = 0, usbHubPort = 0;
+  uint8_t hexMode = 0;  // show RX as hex, line input is parsed as hex bytes
+  uint8_t flow = 0;     // 1 = RTS/CTS hardware flow control (USB adapters that support it)
+  // Name of the preset the settings came from; empty once any of its values is changed.
+  char presetName[PRESET_NAME_LEN] = "Default";
 };
 
 extern Settings cfg;

@@ -3,7 +3,8 @@
 #include <stdint.h>
 
 // USB host driver for USB-serial adapters plugged into the Cardputer's USB-C port,
-// directly or through a hub. Supports CDC-ACM, WCH CH34x, Silabs CP210x and FTDI chips.
+// directly or through a hub. Supports CDC-ACM, WCH CH34x, Silabs CP210x, FTDI and
+// Prolific PL2303 chips.
 // Every serial port found (several chips, multi-port chips) is listed; one is active.
 // Starting it switches the USB PHY to host mode (USB flashing then needs download mode).
 namespace usbserial {
@@ -32,6 +33,11 @@ void setPreferred(const PortId &id);
 void setLine(uint32_t baud, uint8_t dataBits, uint8_t parity, uint8_t stopBits);
 void setBaud(uint32_t baud);
 void setLines(bool dtr, bool rts);
+// RTS/CTS hardware flow control. Returns false if the active chip can't do it
+// (supported: CP210x, FTDI, PL2303).
+bool setFlow(bool rtscts);
+// Hold the TX line low (serial BREAK) for ms milliseconds. Blocks.
+bool sendBreak(uint16_t ms);
 
 size_t read(uint8_t *buf, size_t n);  // non-blocking
 size_t write(const uint8_t *buf, size_t n);

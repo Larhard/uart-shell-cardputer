@@ -6,6 +6,7 @@
 // RX text is written line by line, TX lines are prefixed with "> ".
 namespace sdlog {
 
+bool mount();  // mounts the SD card if needed; also used for the preset file
 bool start(const char *header);  // mounts the card if needed
 void stop();
 bool active();

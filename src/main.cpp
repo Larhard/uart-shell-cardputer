@@ -3,12 +3,13 @@
 
 #include "display.h"
 #include "keyboard.h"
+#include "presets.h"
 #include "sdlog.h"
 #include "settings.h"
 #include "term.h"
 #include "usbserial.h"
 
-#define APP_VERSION "1.2"
+#define APP_VERSION "1.3"
 
 using kbd::Key;
 
@@ -78,6 +79,7 @@ static void linkBegin() {
     usbserial::setPreferred({cfg.usbVid, cfg.usbPid, cfg.usbIface, cfg.usbHubPort});
     usbserial::setLine(cfg.baud, f.bits, f.parity, f.stop);
     usbserial::setLines(cfg.dtr, cfg.rts);
+    usbserial::setFlow(cfg.flow);
   } else {
     uart.setRxBufferSize(16384);
     uart.begin(cfg.baud, f.cfg, cfg.swapPins ? PIN_G2 : PIN_G1, cfg.swapPins ? PIN_G1 : PIN_G2);
@@ -142,6 +144,9 @@ static void jumpToEnd() {
   needFull = true;
 }
 
+// Any change to a value a preset sets turns the settings into custom ones.
+static void presetDirty() { cfg.presetName[0] = 0; }
+
 static void info(const char *fmt, ...) {
   char s[96];
   va_list ap;
@@ -198,6 +203,7 @@ static void scanFinish(uint32_t baud, bool found) {
   linkSetBaud(baud);
   if (found) {
     cfg.autoBaud = 1;
+    if (baud != scan.prevBaud) presetDirty();
     settingsSave();
     info("[auto] locked at %lu baud", (unsigned long)baud);
     logConfigNote();
@@ -253,7 +259,6 @@ static uint8_t echoQ[256];
 static uint8_t eqHead = 0, eqTail = 0;
 static uint32_t echoDeadline = 0;
 
-enum EchoMode : uint8_t { ECHO_OFF, ECHO_HIDE, ECHO_SHOW, ECHO_COUNT };
 static const char *ECHO_NAMES[] = {"Off", "On, hide echo", "On, show all"};
 
 // Received bytes that match what was just sent are held back. They are dropped only
@@ -303,7 +308,28 @@ static void rxByte(uint8_t b) {
   if (!echoSwallow(b)) rxShow(b);
 }
 
+// Hex view: two digits per byte, a new line per packet (a pause between bytes) or when
+// the line is full (13 bytes).
+static const char HEXD[] = "0123456789ABCDEF";
+static uint32_t lastHexRxMs = 0;
+
+static void hexRx(uint8_t b) {
+  uint32_t now = millis();
+  int len = term::cur().len;
+  if (len && (now - lastHexRxMs > 30 || len > term::COLS - 3)) {
+    term::newline();
+    sdlog::rx('\n');
+  }
+  lastHexRxMs = now;
+  char h[3] = {HEXD[b >> 4], HEXD[b & 15], ' '};
+  for (char c : h) {
+    term::put(c);
+    sdlog::rx(c);
+  }
+}
+
 static void rxShow(uint8_t b) {
+  if (cfg.hexMode) return hexRx(b);
 
   switch (ansi) {
     case A_ESC: ansi = b == '[' ? A_CSI : b == ']' ? A_OSC : A_NONE; return;
@@ -407,12 +433,70 @@ static void echoNewline() {
 
 static void sendEol() { send(EOL_BYTES[cfg.eol], strlen(EOL_BYTES[cfg.eol]), true); }
 
+// "FE FE A4 E0 03 FD", "fefea4", "0xFE,0x01" -> bytes. Returns -1 on bad input.
+static int parseHex(const char *s, uint8_t *out, int max) {
+  int n = 0, hi = -1;
+  for (; *s; s++) {
+    char c = *s;
+    if (hi < 0 && c == '0' && (s[1] == 'x' || s[1] == 'X')) {
+      s++;
+      continue;
+    }
+    int v = c >= '0' && c <= '9' ? c - '0' : (c | 0x20) >= 'a' && (c | 0x20) <= 'f' ? (c | 0x20) - 'a' + 10 : -1;
+    if (v < 0) {
+      if (hi >= 0 || !strchr(" ,:-\t", c)) return -1;
+      continue;
+    }
+    if (hi < 0) {
+      hi = v;
+    } else {
+      if (n >= max) return -1;
+      out[n++] = hi << 4 | v;
+      hi = -1;
+    }
+  }
+  return hi >= 0 ? -1 : n;
+}
+
+static void putHexTx(uint8_t b) {
+  if (term::cur().len > term::COLS - 3) term::newline();
+  char h[3] = {HEXD[b >> 4], HEXD[b & 15], ' '};
+  for (char c : h) term::put(c | term::CELL_TX);
+}
+
+static void sendHexLine() {
+  uint8_t bytes[64];
+  int n = parseHex(input, bytes, sizeof bytes);
+  if (n < 0) {
+    info("[hex] use hex pairs, e.g. FE FE A4 E0 03 FD");
+    return;
+  }
+  send((const char *)bytes, n, false);
+  if (cfg.localEcho != ECHO_OFF) {
+    if (term::cur().len) term::newline();
+    for (int i = 0; i < n; i++) putHexTx(bytes[i]);
+    term::newline();
+  }
+  char txt[sizeof bytes * 3 + 1];
+  int t = 0;
+  for (int i = 0; i < n; i++) {
+    txt[t++] = HEXD[bytes[i] >> 4];
+    txt[t++] = HEXD[bytes[i] & 15];
+    txt[t++] = ' ';
+  }
+  sdlog::tx(txt, t ? t - 1 : 0);
+}
+
 static void sendLine() {
-  send(input, inputLen, true);
-  sendEol();
-  echoText(input, inputLen);
-  echoNewline();
-  sdlog::tx(input, inputLen);
+  if (cfg.hexMode) {
+    sendHexLine();
+  } else {
+    send(input, inputLen, true);
+    sendEol();
+    echoText(input, inputLen);
+    echoNewline();
+    sdlog::tx(input, inputLen);
+  }
   if (inputLen && (histCount == 0 || strcmp(hist[0], input) != 0)) {
     memmove(hist[1], hist[0], sizeof(hist[0]) * (HIST - 1));
     memcpy(hist[0], input, inputLen + 1);
@@ -509,7 +593,7 @@ static void drawTerm() {
   if (!cfg.rawMode) {
     canvas.drawFastHLine(0, INPUT_SY - 3, W, C_BAR);
     canvas.setTextColor(C_DIM);
-    canvas.drawString(">", 0, INPUT_SY);
+    canvas.drawString(cfg.hexMode ? "#" : ">", 0, INPUT_SY);
     int vis = term::COLS - 3;
     int start = inputLen > vis ? inputLen - vis : 0;
     char tmp[INPUT_MAX + 1];
@@ -544,8 +628,9 @@ static void drawStatus(bool force) {
     snprintf(port, sizeof port, "U:%s", usbserial::connected() ? usbserial::name() : "--");
   else snprintf(port, sizeof port, "RX:G%d", cfg.swapPins ? 2 : 1);
   const char *lines = !usbPort() ? "" : cfg.dtr && cfg.rts ? "DR" : cfg.dtr ? "D" : cfg.rts ? "R" : "";
-  snprintf(sig, sizeof sig, "%s|%s|%s|%s|%d|%d|%s|%s|%d%d", baud, FRAMES[cfg.frame].name, port, lines,
-           cfg.rawMode, cfg.eol, logTxt, scroll, rxOn, txOn);
+  const char *preset = cfg.presetName;
+  snprintf(sig, sizeof sig, "%s|%s|%s|%s|%s|%d|%d|%d%d|%s|%s|%d%d", baud, preset, FRAMES[cfg.frame].name, port,
+           lines, cfg.rawMode, cfg.eol, cfg.hexMode, cfg.flow, logTxt, scroll, rxOn, txOn);
   if (!force && strcmp(sig, lastStatus) == 0) return;
   strcpy(lastStatus, sig);
 
@@ -557,12 +642,18 @@ static void drawStatus(bool force) {
     bar.drawString(s, x, 1);
     x += (strlen(s) + 1) * CW;
   };
+  // With a preset active its name stands in for the details it set.
   seg(baud, scan.on ? C_TX : C_TEXT);
-  seg(FRAMES[cfg.frame].name, C_DIM);
+  if (*preset) seg(preset, C_INFO);
+  else seg(FRAMES[cfg.frame].name, C_DIM);
   seg(port, usbPort() && !usbserial::connected() ? C_RED : C_DIM);
   seg(lines, C_TX);
-  seg(cfg.rawMode ? "RAW" : "LINE", C_INFO);
-  seg(EOL_NAMES[cfg.eol], C_DIM);
+  seg(cfg.flow ? "HW" : "", C_TX);
+  seg(cfg.hexMode ? "HEX" : "", C_TX);
+  if (!*preset) {
+    seg(cfg.rawMode ? "RAW" : "LINE", C_INFO);
+    seg(cfg.hexMode ? "" : EOL_NAMES[cfg.eol], C_DIM);
+  }
   seg(logTxt, C_RED);
   seg(scroll, C_INFO);
   bar.fillCircle(W - 14, 4, 3, rxOn ? C_RX : 0x2124);
@@ -573,12 +664,21 @@ static void drawStatus(bool force) {
 // ---------------------------------------------------------------------------
 // Settings menu
 // ---------------------------------------------------------------------------
-enum MenuItem { MI_PORT, MI_USBDEV, MI_BAUD, MI_FRAME, MI_PINS, MI_LINES, MI_INPUT, MI_EOL, MI_ECHO, MI_LOG,
-                MI_TS, MI_BRIGHT, MI_PRESET, MI_CLEAR, MI_REBOOT, MI_COUNT };
-static const char *MENU_LABELS[] = {"Port", "USB port", "Baud rate", "Data/parity/stop", "Grove pins",
-                                    "USB DTR / RTS", "Input mode", "Enter sends", "Local echo",
-                                    "SD logging", "Log timestamps", "Brightness",
-                                    "FX-4CR CAT preset", "Clear screen", "Reboot (Launcher)"};
+enum MenuItem { MI_PRESETS, MI_PORT, MI_USBDEV, MI_BAUD, MI_FRAME, MI_PINS, MI_LINES, MI_FLOW, MI_INPUT,
+                MI_EOL, MI_ECHO, MI_HEX, MI_LOG, MI_TS, MI_BRIGHT, MI_CLEAR, MI_REBOOT, MI_COUNT };
+static const char *MENU_LABELS[] = {"Preset", "Port", "USB port", "Baud rate", "Data/parity/stop",
+                                    "Grove pins", "USB DTR / RTS", "Flow control", "Input mode",
+                                    "Enter sends", "Local echo", "Hex mode", "SD logging",
+                                    "Log timestamps", "Brightness", "Clear screen", "Reboot (Launcher)"};
+
+// Items whose values presets set: changing one drops the preset name.
+static bool presetItem(int item) {
+  switch (item) {
+    case MI_PORT: case MI_BAUD: case MI_FRAME: case MI_LINES: case MI_FLOW: case MI_INPUT:
+    case MI_EOL: case MI_ECHO: case MI_HEX: return true;
+    default: return false;
+  }
+}
 constexpr int MENU_ROWS = 11;
 static int menuSel = 0, menuTop = 0;
 static char baudEdit[9];
@@ -609,6 +709,9 @@ static void menuValue(int item, char *out, size_t sz) {
       break;
     }
     case MI_FRAME: snprintf(out, sz, "%s", FRAMES[cfg.frame].name); break;
+    case MI_PRESETS: snprintf(out, sz, "%s", cfg.presetName[0] ? cfg.presetName : "Custom"); break;
+    case MI_FLOW: snprintf(out, sz, cfg.flow ? "RTS/CTS" : "None"); break;
+    case MI_HEX: snprintf(out, sz, cfg.hexMode ? "On" : "Off"); break;
     case MI_PINS: snprintf(out, sz, cfg.swapPins ? "RX=G2 TX=G1" : "RX=G1 TX=G2"); break;
     case MI_INPUT: snprintf(out, sz, cfg.rawMode ? "Raw keys" : "Line"); break;
     case MI_EOL: snprintf(out, sz, "%s", EOL_NAMES[cfg.eol]); break;
@@ -660,25 +763,9 @@ static void startLog() {
   }
 }
 
-// FX-4CR (and other Kenwood TS-590S style CAT radios) over USB: 115200 8N1, commands end
-// with ';' so Enter adds nothing, DTR/RTS off because RTS keys PTT on the FX-4CR.
-static void applyRadioPreset() {
-  cfg.port = PORT_USB;
-  cfg.autoBaud = 0;
-  cfg.baud = 115200;
-  cfg.frame = 0;
-  cfg.eol = EOL_NONE;
-  cfg.rawMode = 0;
-  cfg.dtr = cfg.rts = 0;
-  scan.on = false;
-  linkBegin();
-  logConfigNote();
-  info("[preset] FX-4CR CAT: USB 115200 8N1, Enter adds nothing");
-  info("try FA; (freq) IF; (status) ID; (model)");
-}
-
 static void setManualBaud(uint32_t b) {
   if (scan.on) scan.on = false;
+  presetDirty();
   cfg.autoBaud = 0;
   cfg.baud = b;
   linkSetBaud(b);
@@ -686,6 +773,7 @@ static void setManualBaud(uint32_t b) {
 }
 
 static void changeItem(int item, int dir) {
+  if (presetItem(item)) presetDirty();
   switch (item) {
     case MI_BAUD: {
       // Position 0 is Auto, then the manual list.
@@ -734,6 +822,15 @@ static void changeItem(int item, int dir) {
       break;
     }
     case MI_INPUT: cfg.rawMode ^= 1; rawLen = 0; break;
+    case MI_FLOW:
+      cfg.flow ^= 1;
+      if (!usbPort()) {
+        if (cfg.flow) info("[flow] Grove has only RX/TX; RTS/CTS needs a USB adapter");
+      } else if (!usbserial::setFlow(cfg.flow) && cfg.flow) {
+        info("[flow] this USB chip has no RTS/CTS support");
+      }
+      break;
+    case MI_HEX: cfg.hexMode ^= 1; inputDirty = true; break;
     case MI_EOL: cfg.eol = (cfg.eol + dir + EOL_COUNT) % EOL_COUNT; break;
     case MI_ECHO:
       cfg.localEcho = (cfg.localEcho + dir + ECHO_COUNT) % ECHO_COUNT;
@@ -756,7 +853,6 @@ static void changeItem(int item, int dir) {
       lcd.setBrightness(cfg.brightness);
       break;
     }
-    case MI_PRESET: applyRadioPreset(); break;
     case MI_CLEAR: term::clear(); follow = true; break;
     case MI_REBOOT:
       sdlog::stop();
@@ -779,18 +875,235 @@ static void quickBaud(int dir) {
   info("[baud] %lu", (unsigned long)cfg.baud);
 }
 
+// Serial BREAK: TX held low for 250 ms (Cisco password recovery, some boot loaders).
+static void sendBreak() {
+  constexpr uint16_t MS = 250;
+  bool ok = true;
+  if (usbPort()) {
+    ok = usbserial::sendBreak(MS);
+  } else {
+    int tx = cfg.swapPins ? PIN_G1 : PIN_G2;
+    uart.end();
+    pinMode(tx, OUTPUT);
+    digitalWrite(tx, LOW);
+    delay(MS);
+    linkBegin();
+  }
+  if (ok) {
+    info("[break] %u ms", MS);
+    sdlog::note("BREAK");
+  } else {
+    info("[break] not supported by this adapter");
+  }
+}
+
 static void showHelp() {
-  info("Opt settings  Fn+B detect baud");
+  info("Opt settings  Fn+X presets  Fn+B baud");
   info("Fn+[ ] baud -/+  Fn+F frame  Fn+S swap");
   info("Fn+U Grove/USB  Fn+P next USB port");
-  info("Fn+D DTR  Fn+T RTS");
-  info("Fn+X FX-4CR CAT preset  Fn+I USB info");
-  info("Fn+Z re-enumerate USB");
+  info("Fn+D DTR  Fn+T RTS  Fn+K break");
+  info("Fn+V hex  Fn+I USB info  Fn+Z USB reset");
   info("Fn+R raw/line  Fn+N enter  Fn+E echo");
   info("Fn+L SD log  Fn+C clear  Fn+- = bright");
   info("Fn+; . line  Fn+, / page  Fn+Ent end");
   info("Ctrl+key ctrl char  Alt+; . history");
   jumpToEnd();
+}
+
+// ---------------------------------------------------------------------------
+// Preset picker (Fn+X): groups, then the presets of a group. "My presets" are read
+// from /uart_presets.txt on the SD card; its first row saves the current settings.
+// ---------------------------------------------------------------------------
+static bool pickOpen = false;
+static int pickLevel = 0, pickGroup = 0, pickSel = 0, pickTop = 0;
+static presets::UserPreset userPresets[presets::USER_MAX];
+static int userCount = -2;  // -2: not read yet, -1: no SD card
+static bool naming = false;
+static char nameBuf[24];
+static uint8_t nameLen = 0;
+static const int USER_GROUP = presets::GROUP_COUNT;
+
+static int pickCount() {
+  if (pickLevel == 0) return presets::GROUP_COUNT + 1;
+  if (pickGroup == USER_GROUP) return 1 + (userCount > 0 ? userCount : 0);
+  return presets::GROUPS[pickGroup].count;
+}
+
+static const presets::Preset *pickItem(int i) {
+  if (pickGroup == USER_GROUP) return i ? &userPresets[i - 1].p : nullptr;
+  return &presets::GROUPS[pickGroup].items[i];
+}
+
+static const char *pickLabel(int i) {
+  if (pickLevel == 0) return i == USER_GROUP ? "My presets" : presets::GROUPS[i].name;
+  const presets::Preset *p = pickItem(i);
+  return p ? p->name : "+ Save current settings";
+}
+
+static void presetSummary(const presets::Preset &p, char *out, size_t sz) {
+  snprintf(out, sz, "%lu%s%s %s", (unsigned long)p.baud, p.frame ? " " : "", p.frame ? FRAMES[p.frame].name : "",
+           p.hex ? "HEX" : EOL_NAMES[p.eol]);
+}
+
+static void drawPicker() {
+  lcd.startWrite();
+  lcd.fillScreen(C_BG);
+  lcd.fillRect(0, 0, W, STATUS_H, C_BAR);
+  lcd.setTextColor(C_TEXT);
+  const char *title = !pickLevel ? "Presets"
+                      : pickGroup == USER_GROUP ? "My presets"
+                                                : presets::GROUPS[pickGroup].name;
+  lcd.drawString(title, 2, 1);
+  int n = pickCount();
+  if (pickSel < pickTop) pickTop = pickSel;
+  if (pickSel >= pickTop + MENU_ROWS) pickTop = pickSel - MENU_ROWS + 1;
+  for (int i = pickTop; i < n && i < pickTop + MENU_ROWS; i++) {
+    int y = 12 + (i - pickTop) * 10;
+    bool sel = i == pickSel;
+    if (sel) lcd.fillRect(0, y - 1, W, 10, C_SEL);
+    char right[24] = "";
+    const char *label = pickLabel(i);
+    if (pickLevel == 0) {
+      snprintf(right, sizeof right, "%d", i == USER_GROUP ? (userCount > 0 ? userCount : 0) : presets::GROUPS[i].count);
+      if (i == USER_GROUP && userCount == -2) right[0] = 0;
+    } else if (const presets::Preset *p = pickItem(i)) {
+      presetSummary(*p, right, sizeof right);
+    } else if (naming) {
+      static char tmp[32];
+      snprintf(tmp, sizeof tmp, "Name: %s_", nameBuf);
+      label = tmp;
+    }
+    lcd.setTextColor(sel ? C_TEXT : C_DIM);
+    lcd.drawString(label, 4, y);
+    lcd.setTextColor(sel ? C_TX : C_RX);
+    lcd.drawString(right, W - 4 - strlen(right) * CW, y);
+  }
+  // Bottom line: what the selected preset is about, or the keys.
+  char hint[48];
+  const presets::Preset *p = pickLevel ? pickItem(pickSel) : nullptr;
+  if (pickLevel && pickGroup == USER_GROUP && userCount == -1)
+    snprintf(hint, sizeof hint, "No SD card: user presets need one");
+  else if (naming)
+    snprintf(hint, sizeof hint, "Enter save  ` cancel");
+  else if (p && p->note)
+    snprintf(hint, sizeof hint, "%.39s", p->note);
+  else
+    snprintf(hint, sizeof hint, "; . select  Enter apply  , back");
+  lcd.setTextColor(C_DIM);
+  lcd.drawString(hint, 2, H - 9);
+  lcd.endWrite();
+}
+
+static void openPicker() {
+  pickOpen = true;
+  naming = false;
+  pickLevel = pickSel = pickTop = 0;
+  drawPicker();
+}
+
+static void closePicker() {
+  pickOpen = false;
+  needFull = true;
+  inputDirty = true;
+  clampView();
+}
+
+static void applyPreset(const presets::Preset &p) {
+  scan.on = false;
+  if (p.port == presets::USB) cfg.port = PORT_USB;
+  else if (p.port == presets::GROVE) cfg.port = PORT_GROVE;
+  cfg.autoBaud = 0;
+  cfg.baud = p.baud;
+  cfg.frame = p.frame;
+  cfg.eol = p.eol;
+  cfg.rawMode = p.raw;
+  cfg.localEcho = p.echo;
+  cfg.dtr = p.dtr;
+  cfg.rts = p.rts;
+  cfg.hexMode = p.hex;
+  cfg.flow = p.flow;
+  snprintf(cfg.presetName, sizeof cfg.presetName, "%s", p.shortName);
+  eqTail = eqHead;
+  releaseHeld();
+  rawLen = 0;
+  linkBegin();
+  settingsSave();
+  logConfigNote();
+  char sum[32];
+  presetSummary(p, sum, sizeof sum);
+  info("[preset] %s: %s %s", p.name, sum, p.raw ? "raw" : "line");
+  if (p.note) info("%s", p.note);
+  if (p.flow && !usbPort()) info("[flow] RTS/CTS needs a USB adapter");
+}
+
+static void saveCurrentAs(const char *name) {
+  presets::Preset p = {name, name, cfg.baud, cfg.frame, cfg.eol, cfg.rawMode, cfg.localEcho, cfg.dtr,
+                       cfg.rts, cfg.hexMode, cfg.flow, (uint8_t)(usbPort() ? presets::USB : presets::GROVE),
+                       nullptr};
+  if (!presets::saveUser(name, p)) {
+    info("[preset] could not write /uart_presets.txt");
+    return;
+  }
+  userCount = presets::loadUser(userPresets, presets::USER_MAX);
+  snprintf(cfg.presetName, sizeof cfg.presetName, "%s", name);
+  settingsSave();
+  info("[preset] saved \"%s\" to /uart_presets.txt", name);
+}
+
+static void pickerKey(const Key &k) {
+  uint8_t c = k.code;
+  int n = pickCount();
+  if (naming) {
+    if (c == kbd::K_ENTER && nameLen) {
+      naming = false;
+      saveCurrentAs(nameBuf);
+      pickSel = userCount > 0 ? userCount : 0;
+    } else if (c == kbd::K_BKSP && nameLen) {
+      nameBuf[--nameLen] = 0;
+    } else if (c == '`' || c == kbd::K_ESC || c == kbd::K_OPT) {
+      naming = false;
+    } else if (c >= 0x20 && c < 0x7F && c != '[' && c != ']' && nameLen < sizeof nameBuf - 1) {
+      nameBuf[nameLen++] = c;
+      nameBuf[nameLen] = 0;
+    }
+  } else if (c == ';' || c == kbd::K_UP) {
+    pickSel = (pickSel + n - 1) % n;
+  } else if (c == '.' || c == kbd::K_DOWN) {
+    pickSel = (pickSel + 1) % n;
+  } else if (c == kbd::K_ENTER || c == '/' || c == kbd::K_RIGHT) {
+    if (pickLevel == 0) {
+      pickGroup = pickSel;
+      pickLevel = 1;
+      pickSel = pickTop = 0;
+      if (pickGroup == USER_GROUP && userCount < 0) userCount = presets::loadUser(userPresets, presets::USER_MAX);
+    } else if (const presets::Preset *p = pickItem(pickSel)) {
+      closePicker();
+      applyPreset(*p);
+      return;
+    } else if (userCount >= 0) {
+      naming = true;
+      nameLen = 0;
+      nameBuf[0] = 0;
+    }
+  } else if (c == ',' || c == kbd::K_LEFT || c == kbd::K_BKSP || c == '`' || c == kbd::K_ESC) {
+    if (pickLevel == 0) return closePicker();
+    pickLevel = 0;
+    pickSel = pickGroup;
+    pickTop = 0;
+  } else if (c == kbd::K_OPT) {
+    return closePicker();
+  } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+    for (int step = 1; step <= n; step++) {  // jump to the next entry starting with c
+      int i = (pickSel + step) % n;
+      if ((pickLabel(i)[0] | 0x20) == (c | 0x20)) {
+        pickSel = i;
+        break;
+      }
+    }
+  } else {
+    return;
+  }
+  drawPicker();
 }
 
 // Fn+letter shortcuts. Returns false if the key is not a shortcut.
@@ -810,7 +1123,9 @@ static bool shortcut(uint8_t base) {
       if (!usbPort()) info("[usb] port is Grove; Fn+U switches to USB");
       else usbserial::reenumerate();
       return true;
-    case 'x': applyRadioPreset(); settingsSave(); needFull = true; inputDirty = true; return true;
+    case 'x': openPicker(); return true;
+    case 'k': sendBreak(); return true;
+    case 'v': item = MI_HEX; break;
     case 'f': item = MI_FRAME; break;
     case 's': item = MI_PINS; break;
     case 'r': item = MI_INPUT; break;
@@ -831,6 +1146,7 @@ static bool shortcut(uint8_t base) {
       break;
     case 'd':
     case 't':
+      presetDirty();
       if (base == 'd') cfg.dtr ^= 1;
       else cfg.rts ^= 1;
       usbserial::setLines(cfg.dtr, cfg.rts);
@@ -882,9 +1198,13 @@ static void menuKey(const Key &k) {
   } else if (c == '.' || c == kbd::K_DOWN) {
     baudEditLen = 0;
     menuSel = (menuSel + 1) % MI_COUNT;
+  } else if (menuSel == MI_PRESETS && (c == '/' || c == kbd::K_RIGHT || c == kbd::K_ENTER || c == ' ')) {
+    closeMenu();
+    openPicker();
+    return;
   } else if (c == '/' || c == kbd::K_RIGHT || c == kbd::K_ENTER || c == ' ') {
     changeItem(menuSel, 1);
-    if (menuSel == MI_CLEAR || menuSel == MI_PRESET) return closeMenu();
+    if (menuSel == MI_CLEAR) return closeMenu();
   } else if (c == ',' || c == kbd::K_LEFT) {
     changeItem(menuSel, -1);
   } else {
@@ -920,8 +1240,9 @@ static void lineKey(uint8_t c) {
 static void rawKey(uint8_t c) {
   if (c >= 0x20 && c < 0x7F) {
     char ch = c;
-    send(&ch, 1, true);
-    echoText(&ch, 1);
+    send(&ch, 1, !cfg.hexMode);
+    if (!cfg.hexMode) echoText(&ch, 1);
+    else if (cfg.localEcho != ECHO_OFF) putHexTx(c);
     if (rawLen < INPUT_MAX) rawLine[rawLen++] = ch;
   } else if (c == kbd::K_ENTER) {
     sendEol();
@@ -941,6 +1262,7 @@ static void rawKey(uint8_t c) {
 }
 
 static void onKey(const Key &k) {
+  if (pickOpen) return pickerKey(k);
   if (menuOpen) return menuKey(k);
   if (k.code == kbd::K_OPT) {
     menuOpen = true;
@@ -1046,6 +1368,10 @@ void loop() {
   echoTick();
   sdlog::poll();
 
+  if (pickOpen) {
+    delay(1);
+    return;
+  }
   if (menuOpen) {
     static uint32_t lastMenuDraw = 0;
     static bool lastScan = false;

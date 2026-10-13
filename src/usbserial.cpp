@@ -14,8 +14,8 @@
 namespace usbserial {
 namespace {
 
-enum Chip : uint8_t { NONE, CDC, CH34X, CP210X, FTDI };
-const char *CHIP_NAMES[] = {"", "CDC", "CH34x", "CP210x", "FTDI"};
+enum Chip : uint8_t { NONE, CDC, CH34X, CP210X, FTDI, PL2303 };
+const char *CHIP_NAMES[] = {"", "CDC", "CH34x", "CP210x", "FTDI", "PL2303"};
 
 constexpr size_t IN_SIZE = 512, OUT_SIZE = 256, CTRL_SIZE = 8 + 64;
 constexpr TickType_t CTRL_WAIT = pdMS_TO_TICKS(500), OUT_WAIT = pdMS_TO_TICKS(200);
@@ -169,6 +169,7 @@ struct Dev {
   usb_device_handle_t h;
   uint8_t addr, hubPort, mps0, numIfaces;
   uint16_t vid, pid, bcd;
+  uint8_t cls;  // bDeviceClass
 };
 struct Port {
   uint8_t dev;  // index into devs
@@ -204,7 +205,11 @@ volatile bool inBusy = false, outBusy = false, ctrlBusy = false;
 
 uint32_t lBaud = 115200;
 uint8_t lBits = 8, lParity = 0, lStop = 1;
-bool lDtr = false, lRts = false;
+bool lDtr = false, lRts = false, lFlow = false;
+
+// Prolific PL2303 variants, as told apart by the Linux pl2303 driver.
+enum PlType : uint8_t { PL_LEGACY, PL_HX, PL_HXN };
+PlType plType = PL_HX;
 
 // --- USB host plumbing ------------------------------------------------------
 
@@ -337,12 +342,44 @@ uint32_t ftdiDivisor(uint32_t baud) {
   return d;
 }
 
+// PL2303 vendor registers. HXN chips use different request codes and plain addresses.
+bool plRead(uint16_t reg, uint8_t &val) {
+  return control(0xC0, plType == PL_HXN ? 0x81 : 0x01, reg, 0, &val, 1);
+}
+bool plWrite(uint16_t reg, uint16_t val) { return control(0x40, plType == PL_HXN ? 0x80 : 0x01, reg, val); }
+bool plUpdate(uint8_t reg, uint8_t mask, uint8_t val) {
+  uint8_t cur = 0;
+  if (!plRead(plType == PL_HXN ? reg : (reg | 0x80), cur)) return false;
+  return plWrite(reg, (cur & ~mask) | (val & mask));
+}
+
+// Returns false if the chip can't do RTS/CTS (only when flow control was requested).
+bool applyFlow() {
+  switch (chip) {
+    case CP210X: {
+      // SET_FLOW: ulControlHandshake (DTR active, CTS handshake), ulFlowReplace (RTS mode),
+      // XON/XOFF limits. RTS mode: 1 = static on, 0 = off, 2 = flow control.
+      uint32_t hs = (lDtr ? 0x01 : 0) | (lFlow ? 0x08 : 0);
+      uint32_t repl = (uint32_t)(lFlow ? 2 : lRts ? 1 : 0) << 6;
+      uint8_t b[16] = {(uint8_t)hs, (uint8_t)(hs >> 8), 0, 0, (uint8_t)repl, (uint8_t)(repl >> 8), 0, 0,
+                       128, 0, 0, 0, 128, 0, 0, 0};
+      return control(0x41, 0x13, 0, dataIf, b, sizeof b);
+    }
+    case FTDI: return control(0x40, 2, 0, (lFlow ? 0x0100 : 0) | ftdiChannel);  // SET_FLOW_CTRL
+    case PL2303:
+      if (plType == PL_HXN) return plUpdate(0x0A, 0x1C, lFlow ? 0x18 : 0x1C);
+      return plUpdate(0, 0xF0, lFlow ? (plType == PL_LEGACY ? 0x40 : 0x60) : 0);
+    default: return !lFlow;
+  }
+}
+
 bool applyLine() {
   switch (chip) {
+    case PL2303:
     case CDC: {
       uint8_t lc[7] = {(uint8_t)lBaud, (uint8_t)(lBaud >> 8), (uint8_t)(lBaud >> 16),
                        (uint8_t)(lBaud >> 24), (uint8_t)(lStop == 2 ? 2 : 0), lParity, lBits};
-      return control(0x21, 0x20, 0, commIf, lc, sizeof lc);  // SET_LINE_CODING
+      return control(0x21, 0x20, 0, chip == PL2303 ? dataIf : commIf, lc, sizeof lc);  // SET_LINE_CODING
     }
     case CH34X: {
       uint16_t div = ch341Divisor(lBaud);
@@ -371,12 +408,33 @@ bool applyLine() {
 }
 
 bool applyModem() {
+  // With hardware flow control the chip drives RTS itself; only DTR is set here.
   uint16_t dtr = lDtr ? 1 : 0, rts = lRts ? 2 : 0;
   switch (chip) {
     case CDC: return control(0x21, 0x22, dtr | rts, commIf);  // SET_CONTROL_LINE_STATE
+    case PL2303: return control(0x21, 0x22, dtr | (lFlow ? 2 : rts), dataIf);
     case CH34X: return control(0x40, 0xA4, (uint16_t) ~((lDtr ? 0x20 : 0) | (lRts ? 0x40 : 0)), 0);
-    case CP210X: return control(0x41, 0x07, 0x0300 | dtr | rts, dataIf);  // SET_MHS
-    case FTDI: return control(0x40, 1, 0x0300 | dtr | rts, ftdiChannel);  // MODEM_CTRL
+    case CP210X: return control(0x41, 0x07, lFlow ? 0x0100 | dtr : 0x0300 | dtr | rts, dataIf);  // SET_MHS
+    case FTDI: return control(0x40, 1, lFlow ? 0x0100 | dtr : 0x0300 | dtr | rts, ftdiChannel);  // MODEM_CTRL
+    default: return false;
+  }
+}
+
+bool breakOn(bool on) {
+  switch (chip) {
+    case CDC: return true;  // SEND_BREAK with a duration is issued by sendBreak()
+    case PL2303: return control(0x21, 0x23, on ? 0xFFFF : 0, dataIf);
+    case CP210X: return control(0x41, 0x05, on ? 1 : 0, dataIf);  // SET_BREAK
+    case FTDI:  // SET_DATA with the break bit
+      return control(0x40, 4, lBits | lParity << 8 | (lStop == 2 ? 2 : 0) << 11 | (on ? 1 << 14 : 0),
+                     ftdiChannel);
+    case CH34X: {  // Linux ch341_break_ctl: break and TX-enable bits in registers 0x05/0x18
+      uint8_t r[2];
+      if (!control(0xC0, 0x95, 0x1805, 0, r, 2)) return false;
+      if (on) r[0] &= ~0x01, r[1] &= ~0x40;
+      else r[0] |= 0x01, r[1] |= 0x40;
+      return control(0x40, 0x9A, 0x1805, r[0] | r[1] << 8);
+    }
     default: return false;
   }
 }
@@ -484,6 +542,35 @@ bool activate(int i) {
     case CP210X:
       control(0x41, 0x00, 1, dataIf);  // IFC_ENABLE
       break;
+    case PL2303: {
+      static const uint16_t HXN_PIDS[] = {0x23a3, 0x23b3, 0x23c3, 0x23d3, 0x23e3, 0x23f3};
+      plType = PL_HX;
+      for (uint16_t pid : HXN_PIDS)
+        if (d.pid == pid) plType = PL_HXN;
+      if (plType != PL_HXN && (d.cls == 0x02 || d.mps0 != 0x40)) plType = PL_LEGACY;
+      if (plType != PL_HXN) {  // init sequence from the Linux pl2303 driver
+        uint8_t b;
+        plRead(0x8484, b);
+        plWrite(0x0404, 0);
+        plRead(0x8484, b);
+        plRead(0x8383, b);
+        plRead(0x8484, b);
+        plWrite(0x0404, 1);
+        plRead(0x8484, b);
+        plRead(0x8383, b);
+        plWrite(0, 1);
+        plWrite(1, 0);
+        plWrite(2, plType == PL_LEGACY ? 0x24 : 0x44);
+        if (plType == PL_HX) {
+          plWrite(8, 0);  // reset upstream / downstream pipes
+          plWrite(9, 0);
+        }
+      } else {
+        plWrite(0x07, 0x03);  // HXN: reset both pipes
+      }
+      logf("PL2303 type %s", plType == PL_HXN ? "HXN" : plType == PL_HX ? "HX" : "legacy");
+      break;
+    }
     case FTDI:
       ftdiChannel = d.numIfaces > 1 ? dataIf + 1 : 0;
       ftdiH = d.bcd == 0x0700 || d.bcd == 0x0800 || d.bcd == 0x0900;
@@ -496,6 +583,7 @@ bool activate(int i) {
   if (!applyLine()) logf("line setup (baud/format) failed");
   else logf("line set: %lu baud, %u data bits", (unsigned long)lBaud, lBits);
   if (!applyModem()) logf("DTR/RTS setup failed");
+  if (!applyFlow()) logf("%s: no RTS/CTS flow control support", CHIP_NAMES[chip]);
   flushInput();
   active = i;
   ready = true;
@@ -523,7 +611,8 @@ void scanDevice(uint8_t addr) {
   usb_host_get_active_config_descriptor(h, &cd);
   uint8_t hubPort = usb_host_device_info(h, &info) == ESP_OK && info.parent.dev_hdl ? info.parent.port_num : 0;
 
-  Dev d = {h, addr, hubPort, dd->bMaxPacketSize0, cd->bNumInterfaces, dd->idVendor, dd->idProduct, dd->bcdDevice};
+  Dev d = {h, addr, hubPort, dd->bMaxPacketSize0, cd->bNumInterfaces, dd->idVendor, dd->idProduct,
+           dd->bcdDevice, dd->bDeviceClass};
   int devIdx = devCount, found = 0;
   bool isHub = dd->bDeviceClass == 0x09;
 
@@ -542,6 +631,7 @@ void scanDevice(uint8_t addr) {
     else if (cls == 0xFF && d.vid == 0x1A86) c = CH34X;
     else if (cls == 0xFF && d.vid == 0x10C4) c = CP210X;
     else if (cls == 0xFF && d.vid == 0x0403) c = FTDI;
+    else if (cls == 0xFF && d.vid == 0x067B) c = PL2303;
     else if (cls == 0xFF && lastComm >= 0 && lastComm == cur.dataIf - 1) c = CDC;
     if (c == NONE) return;
     cur.chip = c;
@@ -727,7 +817,29 @@ void setBaud(uint32_t baud) { setLine(baud, lBits, lParity, lStop); }
 void setLines(bool dtr, bool rts) {
   lDtr = dtr;
   lRts = rts;
-  if (ready) applyModem();
+  if (!ready) return;
+  applyModem();
+  if (chip == CP210X) applyFlow();  // its flow settings also hold the DTR/RTS modes
+}
+
+bool setFlow(bool rtscts) {
+  lFlow = rtscts;
+  if (!ready) return true;
+  bool ok = applyFlow();
+  applyModem();
+  return ok;
+}
+
+bool sendBreak(uint16_t ms) {
+  if (!ready || gone) return false;
+  if (chip == CDC) {
+    if (!control(0x21, 0x23, ms, commIf)) return false;  // SEND_BREAK, device times it
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    return true;
+  }
+  if (!breakOn(true)) return false;
+  vTaskDelay(pdMS_TO_TICKS(ms));
+  return breakOn(false);
 }
 
 size_t read(uint8_t *buf, size_t n) {

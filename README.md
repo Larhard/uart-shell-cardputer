@@ -8,9 +8,11 @@ A small, fast-booting serial terminal for the **M5Stack Cardputer ADV**. Plug a 
 - Set the baud rate by hand (preset list or any custom rate), or detect it automatically on demand. The detected rate is remembered.
 - Logs to a timestamped file on the SD card, one file per session.
 - Line mode (edit, then send) or raw mode (every key is sent at once).
+- About 40 presets for consoles, radios, projectors and modules, plus your own presets saved on the SD card.
+- Hex mode for binary protocols (Icom CI-V, Modbus, ...), serial BREAK, RTS/CTS flow control.
 - Talks to the Grove UART, or to a USB-serial device plugged into the USB-C port (USB host mode). For example, the CAT port of a (tr)uSDX or FX-4CR radio.
 - All settings are restored at the next launch, stored in NVS.
-- Works with [Launcher](https://bmorcelli.github.io/Launcher/catalog.html). It's a plain app image of about 520 KB with no data partition.
+- Works with [Launcher](https://bmorcelli.github.io/Launcher/catalog.html). It's a plain app image of about 535 KB with no data partition.
 
 Builds on ideas from [Evil-M5Project](https://github.com/7h30th3r0n3/Evil-M5project) (UART shell) and [UARTerm](https://github.com/Zolibot/UARTerm) (SD logging).
 
@@ -31,6 +33,7 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 | Keys | Action |
 |------|--------|
 | `Opt` | Open or close the settings menu |
+| `Fn+X` | Open the preset picker |
 | `Fn+H` | Show the shortcut help in the terminal |
 | `Fn+B` | Detect the baud rate now (`Fn+Esc` cancels). The result is saved |
 | `Fn+[` / `Fn+]` | Previous / next standard baud rate |
@@ -38,8 +41,9 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 | `Fn+U` | Switch the port between the Grove UART and USB host |
 | `Fn+S` | Swap the Grove RX/TX pins |
 | `Fn+D` / `Fn+T` | Turn the USB adapter's DTR / RTS line on or off |
+| `Fn+K` | Send a serial BREAK (250 ms) |
+| `Fn+V` | Turn hex mode on or off |
 | `Fn+P` | Switch to the next USB serial port, when several are attached |
-| `Fn+X` | Apply the FX-4CR CAT preset (see below) |
 | `Fn+I` | USB diagnostics: host state and every device on the bus |
 | `Fn+Z` | Re-enumerate the USB bus (power-cycles the Cardputer's USB port) |
 | `Fn+R` | Switch between line mode and raw mode |
@@ -60,7 +64,69 @@ Connect the target's TX to the Cardputer's RX, and its RX to the Cardputer's TX.
 
 ### Settings menu (`Opt`)
 
-`;` / `.` select an item, `,` / `/` / Enter change it, and `` ` ``, Opt or Backspace close the menu. On the *Baud rate* item, type digits and press Enter to set a custom rate. The menu also has an item to reboot the device, which returns you to Launcher.
+`;` / `.` select an item, `,` / `/` / Enter change it, and `` ` ``, Opt or Backspace close the menu. On the *Baud rate* item, type digits and press Enter to set a custom rate. *Preset* opens the preset picker. *Flow control* switches RTS/CTS on USB adapters that support it. The menu also has an item to reboot the device, which returns you to Launcher.
+
+## Presets
+
+`Fn+X` (or *Preset* in the settings menu) opens the preset picker: first a list of groups, then the presets in a group. `;` / `.` move, Enter applies, `,` or `` ` `` goes back, and typing a letter jumps to the next entry that starts with it. The bottom line shows a note for the selected preset (wiring, voltage levels, example commands); the note is also printed when the preset is applied.
+
+A preset sets the baud rate, data format, what Enter sends, line/raw input, echo, DTR/RTS, hex mode and flow control. Presets for devices that only have a USB port (the FX-4CR) also switch the port to USB. Pins, logging and brightness are left alone.
+
+The status bar shows the active preset's name instead of the details it set. **Changing any of those values drops the name**: the settings are then *Custom*, as shown in the menu. Applying a preset again restores it. A fresh install starts with the *Default* preset.
+
+| Group | Presets |
+|-------|---------|
+| General | Default (115200 8N1, Enter sends CR) |
+| Dev boards & Linux | U-Boot / Linux console, Raspberry Pi, ESP32 / Arduino, ESP8266 boot log (74880), Marlin 3D printer, GRBL CNC |
+| Network gear | Cisco / HP / Aruba / Juniper (9600), MikroTik / Ubiquiti / OpenWrt (115200) |
+| VoIP & embedded | Yealink / Polycom / Grandstream phones, Cisco IP phones |
+| Ham CAT (text) | truSDX, uSDX, FX-4CR, Kenwood, Yaesu FT-991A family, Elecraft |
+| Ham CAT (binary) | Icom CI-V (IC-705/7300/9700), Yaesu FT-817/857/897 |
+| Two-way radios | Baofeng UV-5R / BF-888, Quansheng UV-K5, Kenwood TK, Motorola GM/GP/CDM |
+| Projectors & TVs | Sanyo, Epson (ESC/VP21), BenQ, NEC, Samsung EX-Link |
+| Modules & devices | GPS (NMEA), AT modems, HC-05, Meshtastic, Victron VE.Direct, Modbus RTU, APC UPS |
+| My presets | your own, from the SD card |
+
+The values are common factory defaults. Many devices let you change their rate (radios especially), so if a device stays silent, check its menu or try `Fn+B` / `Fn+[` `Fn+]`. Several of these devices (Cisco consoles, projectors, TVs, older radios, UPSs) use **RS-232 levels (±12 V)**, which would damage the 3.3 V Grove port: use a USB-RS232 cable, or a MAX3232 level shifter on the Grove port. Their preset notes say so.
+
+The two-way radio presets are for watching the programming port. The programming protocols themselves are binary and vendor specific; the terminal does not clone or program radios.
+
+### My presets
+
+In the *My presets* group, the first entry, **+ Save current settings**, asks for a name and appends the current settings to `/uart_presets.txt` on the SD card. The file is plain text, so you can edit, copy or share it on a PC:
+
+```ini
+[Shack IC-705]
+short=IC-705        ; status bar name, up to 11 characters
+baud=115200
+format=8N1          ; 8N1 8E1 8O1 8N2 7E1 7O1
+enter=none          ; cr lf crlf none
+input=line          ; line raw
+echo=show           ; off hide show
+dtr=0
+rts=0
+hex=1
+flow=none           ; none rtscts
+port=usb            ; keep grove usb
+note=CI-V address A4
+```
+
+Missing keys take the Default preset's values. Up to 16 presets are read.
+
+## Hex mode
+
+`Fn+V` (or *Hex mode* in the menu) is for binary protocols:
+
+- **Received data** is shown as hex bytes, 13 per line. A pause of more than 30 ms between bytes starts a new line, so each packet usually gets its own line.
+- **In line mode, you type bytes as hex.** `FE FE A4 E0 03 FD`, `fefea4e003fd` and `0xFE,0xFE` all work. Nothing is added on Enter; type `0D` if the device needs a CR. The input prompt changes from `>` to `#`.
+- In raw mode, each key is sent as its byte value and shown in hex.
+- The SD log records hex too, with sent lines prefixed `> ` as usual.
+
+## Serial BREAK and flow control
+
+`Fn+K` holds the TX line low for 250 ms (a serial BREAK), which Cisco password recovery and some boot loaders need. It works on the Grove port and on all supported USB chips.
+
+*Flow control* in the settings menu turns on RTS/CTS hardware flow control. It needs a USB adapter that supports it (CP210x, FTDI or PL2303): the Grove port has only RX and TX, and the CH340 and CDC devices don't support it. With flow control on, the adapter drives RTS itself.
 
 ## USB serial devices (USB host mode)
 
@@ -73,6 +139,7 @@ Supported devices:
 | WCH CH340 / CH341 | Most Arduino Nano clones, cheap USB-TTL cables, and likely the (tr)uSDX (check which chip your build uses) |
 | Silicon Labs CP210x | CP2102 / CP2104 modules, many ESP32 dev boards |
 | FTDI FT232R / FT230X / FT2232H / FT232H | FTDI cables and boards |
+| Prolific PL2303 (HX, HXN, older) | Many RS-232 and radio programming cables |
 | Standard USB CDC-ACM | CH343 / CH9102, Arduino boards with native USB, RP2040, STM32 VCP |
 
 The status bar shows `U:CH34x` (or the detected type) when an adapter is connected, and `U:--` in red when nothing is connected. Plugging and unplugging is detected automatically. Settings are re-applied each time an adapter connects.
@@ -96,12 +163,7 @@ The BG2FX FX-4CR's USB port has a COM port and a USB sound card behind one cable
 
 When the radio is plugged in, the hub sometimes fails to reset one of its ports, and ESP-IDF doesn't retry that. If the hub appears but no serial port shows up, the app re-enumerates the bus automatically, up to 3 times. `Fn+Z` does the same by hand.
 
-Nothing in the app is FX-4CR specific: hub support, freeing host channels and the CH340 driver work for any device. The preset is only a shortcut for the right settings. Press `Fn+X`, or choose *FX-4CR CAT preset* in the settings menu. This sets:
-
-- Port: USB, 115200 baud, 8N1
-- *Enter sends*: none, because CAT commands end with `;`
-- Line mode
-- **DTR and RTS off**, because RTS on keys the transmitter
+Nothing in the app is FX-4CR specific: hub support, freeing host channels and the CH340 driver work for any device. The *FX-4CR* preset (in *Ham CAT (text)*) sets USB, 115200 8N1, Enter sends nothing (CAT commands end with `;`), line mode, and **DTR and RTS off**, because RTS on keys the transmitter.
 
 Then type commands, for example:
 
@@ -117,7 +179,7 @@ Then type commands, for example:
 
 Hamlib users report that this radio's CAT link only works without RTS/CTS handshaking, and that `AI1` can interleave unsolicited `TX`/`RX` messages with replies ([Hamlib #2195](https://github.com/Hamlib/Hamlib/issues/2195)).
 
-**For (tr)uSDX CAT control:** set the baud rate to match the radio's CAT setting (115200 is common). Set *Enter sends* to `None` (`Fn+N`), because Kenwood-style CAT commands end with `;`, for example `FA;` or `IF;`. Line mode works well for this.
+The radio stays silent when it gets a command it doesn't know, and commands are case-sensitive: `fa;` gets no reply, `FA;` does.
 
 ### Hardware notes
 
@@ -226,7 +288,7 @@ The same files also stay in `.pio/build/cardputer-adv/` as `firmware.bin` and `u
 
 ## Using it with Launcher
 
-Copy `dist/UART_Shell_v<ver>_CardputerADV.bin` to the SD card (any folder). On the Cardputer, open Launcher, choose **SD**, select the file and then **Install**. The app doesn't use SPIFFS or FAT partitions, so Launcher only installs the 520 KB app image. Settings are stored in NVS under the `uartshell` namespace, so they survive reinstalls and switching between apps. To get back to Launcher, reset the device or use *Reboot* in the settings menu.
+Copy `dist/UART_Shell_v<ver>_CardputerADV.bin` to the SD card (any folder). On the Cardputer, open Launcher, choose **SD**, select the file and then **Install**. The app doesn't use SPIFFS or FAT partitions, so Launcher only installs the 535 KB app image. Settings are stored in NVS under the `uartshell` namespace, so they survive reinstalls and switching between apps. To get back to Launcher, reset the device or use *Reboot* in the settings menu.
 
 ## Project layout
 
@@ -236,7 +298,8 @@ src/term.*         scrollback ring buffer (2000 lines x 40 columns)
 src/keyboard.*     TCA8418 keyboard driver for the Cardputer ADV
 src/display.h      fixed ST7789 panel config (LovyanGFX)
 src/sdlog.*        buffered SD session logger
-src/usbserial.*    USB host driver for CDC-ACM, CH34x, CP210x and FTDI adapters
+src/usbserial.*    USB host driver for CDC-ACM, CH34x, CP210x, FTDI and PL2303 adapters
+src/presets.*      built-in presets and the /uart_presets.txt reader/writer
 src/settings.*     settings stored in NVS
 partitions.csv     8 MB layout with two OTA app slots and no data partitions
 tools/merge_bin.py post-build step that creates the merged image and dist/ package

@@ -62,16 +62,17 @@ void endRxLine() {
 
 }  // namespace
 
+bool mount() {
+  if (mounted) return true;
+  sdSpi.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
+  mounted = SD.begin(PIN_CS, sdSpi, 25000000);
+  if (!mounted) sdSpi.end();
+  return mounted;
+}
+
 bool start(const char *header) {
   if (open) return true;
-  if (!mounted) {
-    sdSpi.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
-    mounted = SD.begin(PIN_CS, sdSpi, 25000000);
-    if (!mounted) {
-      sdSpi.end();
-      return false;
-    }
-  }
+  if (!mount()) return false;
   if (!SD.exists(DIR)) SD.mkdir(DIR);
   for (int tries = 0; tries < 10000; tries++) {
     cfg.logCounter = cfg.logCounter % 9999 + 1;
