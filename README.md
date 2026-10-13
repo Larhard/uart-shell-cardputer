@@ -96,7 +96,7 @@ The BG2FX FX-4CR's USB port has a COM port and a USB sound card behind one cable
 
 When the radio is plugged in, the hub sometimes fails to reset one of its ports, and ESP-IDF doesn't retry that. If the hub appears but no serial port shows up, the app re-enumerates the bus automatically, up to 3 times. `Fn+Z` does the same by hand.
 
-Press `Fn+X`, or choose *FX-4CR CAT preset* in the settings menu. This sets:
+Nothing in the app is FX-4CR specific: hub support, freeing host channels and the CH340 driver work for any device. The preset is only a shortcut for the right settings. Press `Fn+X`, or choose *FX-4CR CAT preset* in the settings menu. This sets:
 
 - Port: USB, 115200 baud, 8N1
 - *Enter sends*: none, because CAT commands end with `;`
@@ -136,7 +136,7 @@ Detection only runs when you press `Fn+B`. It cycles through the common rates, f
 
 | Mode | What you see |
 |------|--------------|
-| **On, hide echo** (default) | What you type appears in the TX color. Many devices (Linux consoles, U-Boot, most shells) echo your input back. Those bytes are recognized and hidden, so lines don't show up twice. Devices that don't echo work the same way. |
+| **On, hide echo** (default) | What you type appears in the TX color. Many devices (Linux consoles, U-Boot, most shells) echo your input back. Those bytes are recognized and hidden, so lines don't show up twice. Received bytes are only hidden once the *whole* sent text has come back; a reply that merely starts the same way (a CAT reply `FA00014074000;` to `FA;`) is shown in full. Devices that don't echo work the same way. |
 | **On, show all** | What you type appears in the TX color, and everything received is shown in the RX color, including the echo. Use this for loopback tests (TX wired to RX). |
 | **Off** | Nothing you type is shown locally. You only see what the device sends back. |
 

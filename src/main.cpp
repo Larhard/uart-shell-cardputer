@@ -256,23 +256,54 @@ static uint32_t echoDeadline = 0;
 enum EchoMode : uint8_t { ECHO_OFF, ECHO_HIDE, ECHO_SHOW, ECHO_COUNT };
 static const char *ECHO_NAMES[] = {"Off", "On, hide echo", "On, show all"};
 
+// Received bytes that match what was just sent are held back. They are dropped only
+// once the whole sent text has come back; if the data diverges first (e.g. a CAT reply
+// "FA00014074000;" to "FA;") or nothing more arrives in time, they are shown after all.
+static uint8_t echoHeld[INPUT_MAX + 8];
+static uint8_t heldLen = 0;
+
+static void rxShow(uint8_t b);
+
+static void releaseHeld() {
+  uint8_t n = heldLen;
+  heldLen = 0;
+  for (uint8_t i = 0; i < n; i++) rxShow(echoHeld[i]);
+}
+
+static bool echoExpired() { return (int32_t)(millis() - echoDeadline) > 0; }
+
 static bool echoSwallow(uint8_t b) {
   if (cfg.localEcho != ECHO_HIDE || eqHead == eqTail) return false;
-  if ((int32_t)(millis() - echoDeadline) > 0) {
+  if (echoExpired()) {
     eqTail = eqHead;
+    releaseHeld();
     return false;
   }
-  if (b == echoQ[eqTail]) {
-    eqTail++;
+  bool crlf = b == '\r' && echoQ[eqTail] == '\n';  // tty turned LF into CRLF
+  if (b == echoQ[eqTail] || crlf) {
+    if (heldLen < sizeof echoHeld) echoHeld[heldLen++] = b;
+    if (!crlf) eqTail++;
+    if (eqHead == eqTail) heldLen = 0;  // the complete echo arrived: drop it
     return true;
   }
-  if (b == '\r' && echoQ[eqTail] == '\n') return true;  // tty turned LF into CRLF
-  eqTail = eqHead;  // not an echo, stop filtering
+  eqTail = eqHead;  // not an echo
+  releaseHeld();
   return false;
 }
 
+// Called from loop(): show held bytes if the rest of the echo never came.
+static void echoTick() {
+  if (heldLen && echoExpired()) {
+    eqTail = eqHead;
+    releaseHeld();
+  }
+}
+
 static void rxByte(uint8_t b) {
-  if (echoSwallow(b)) return;
+  if (!echoSwallow(b)) rxShow(b);
+}
+
+static void rxShow(uint8_t b) {
 
   switch (ansi) {
     case A_ESC: ansi = b == '[' ? A_CSI : b == ']' ? A_OSC : A_NONE; return;
@@ -344,7 +375,10 @@ static void send(const char *s, size_t n, bool expectEcho) {
   lastTxMs = millis();
   jumpToEnd();
   if (!expectEcho || cfg.localEcho != ECHO_HIDE) return;
-  if ((int32_t)(millis() - echoDeadline) > 0) eqTail = eqHead;  // drop bytes that never came back
+  if (echoExpired()) {  // drop sent bytes that never came back, show anything held
+    eqTail = eqHead;
+    releaseHeld();
+  }
   for (size_t i = 0; i < n; i++) {
     uint8_t c = s[i];
     if ((c >= 0x20 && c < 0x7F) || c == '\r' || c == '\n') {
@@ -636,13 +670,10 @@ static void applyRadioPreset() {
   cfg.eol = EOL_NONE;
   cfg.rawMode = 0;
   cfg.dtr = cfg.rts = 0;
-  // CAT replies start with the command ("FA;" -> "FA00014074000;"), which the echo
-  // filter would mistake for an echo; show everything instead.
-  cfg.localEcho = ECHO_SHOW;
   scan.on = false;
   linkBegin();
   logConfigNote();
-  info("[preset] FX-4CR CAT: USB 115200 8N1, Enter adds nothing, echo shows all");
+  info("[preset] FX-4CR CAT: USB 115200 8N1, Enter adds nothing");
   info("try FA; (freq) IF; (status) ID; (model)");
 }
 
@@ -704,7 +735,11 @@ static void changeItem(int item, int dir) {
     }
     case MI_INPUT: cfg.rawMode ^= 1; rawLen = 0; break;
     case MI_EOL: cfg.eol = (cfg.eol + dir + EOL_COUNT) % EOL_COUNT; break;
-    case MI_ECHO: cfg.localEcho = (cfg.localEcho + dir + ECHO_COUNT) % ECHO_COUNT; eqTail = eqHead; break;
+    case MI_ECHO:
+      cfg.localEcho = (cfg.localEcho + dir + ECHO_COUNT) % ECHO_COUNT;
+      eqTail = eqHead;
+      releaseHeld();
+      break;
     case MI_LOG:
       if (sdlog::active() || cfg.logEnabled) {
         sdlog::stop();
@@ -1008,6 +1043,7 @@ void loop() {
   Key k;
   while (kbd::get(k)) onKey(k);
   scanTick();
+  echoTick();
   sdlog::poll();
 
   if (menuOpen) {
