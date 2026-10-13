@@ -8,7 +8,7 @@ A small, fast-booting serial terminal for the **M5Stack Cardputer ADV**. Plug a 
 - Set the baud rate by hand (preset list or any custom rate), or detect it automatically on demand. The detected rate is remembered.
 - Logs to a timestamped file on the SD card, one file per session.
 - Line mode (edit, then send) or raw mode (every key is sent at once).
-- About 40 presets for consoles, radios, projectors and modules, plus your own presets saved on the SD card.
+- 35 presets for consoles, radios, projectors and modules, plus your own presets saved on the SD card.
 - Hex mode for binary protocols (Icom CI-V, Modbus, ...), serial BREAK, RTS/CTS flow control.
 - Talks to the Grove UART, or to a USB-serial device plugged into the USB-C port (USB host mode). For example, the CAT port of a (tr)uSDX or FX-4CR radio.
 - All settings are restored at the next launch, stored in NVS.
