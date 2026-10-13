@@ -194,6 +194,11 @@ bool commClaimed = false;
 uint16_t ftdiChannel = 0;  // 0 for single-port chips, interface+1 otherwise
 bool ftdiH = false;        // FT2232H/FT4232H/FT232H: 120 MHz baud clock
 uint16_t chVersion = 0;
+
+// Traffic counters for Fn+I. Transfer status 0 = completed (see usb_transfer_status_t).
+uint32_t statTx = 0, statRx = 0, statInXfers = 0;
+uint8_t lastInStatus = 0, lastOutStatus = 0;
+uint16_t statWriteFails = 0;
 usb_transfer_t *xIn = nullptr, *xOut = nullptr, *xCtrl = nullptr;
 volatile bool inBusy = false, outBusy = false, ctrlBusy = false;
 
@@ -243,13 +248,19 @@ void submitIn() {
 
 void inCb(usb_transfer_t *t) {
   inBusy = false;
+  statInXfers++;
+  lastInStatus = t->status;
   if (t->status != USB_TRANSFER_STATUS_COMPLETED) return;  // stall, cancel or unplug
   const uint8_t *d = t->data_buffer;
   int n = t->actual_num_bytes;
+  statRx += chip == FTDI ? 0 : n;
   if (chip == FTDI) {  // every packet starts with 2 modem status bytes
     for (int off = 0; off < n; off += mpsIn) {
       int len = n - off < mpsIn ? n - off : mpsIn;
-      if (len > 2) xStreamBufferSend(rx, d + off + 2, len - 2, 0);
+      if (len > 2) {
+        xStreamBufferSend(rx, d + off + 2, len - 2, 0);
+        statRx += len - 2;
+      }
     }
   } else if (n > 0) {
     xStreamBufferSend(rx, d, n, 0);
@@ -457,9 +468,17 @@ bool activate(int i) {
   switch (chip) {
     case CH34X: {
       uint8_t v[2] = {0, 0};
-      control(0xC0, 0x5F, 0, 0, v, 2);  // read version
-      chVersion = v[0];
-      control(0x40, 0xA1, 0, 0);  // serial init
+      if (control(0xC0, 0x5F, 0, 0, v, 2) && v[0]) {  // read version
+        chVersion = v[0];
+        logf("CH34x chip version 0x%02x", chVersion);
+      } else {
+        // Without bit 7 in the divisor register the chip holds received data until a
+        // full 32-byte packet is collected, so short replies would never arrive.
+        // Assume a current chip, which is what nearly all CH340/CH341 are.
+        chVersion = 0x31;
+        logf("CH34x version read failed, assuming 0x31");
+      }
+      if (!control(0x40, 0xA1, 0, 0)) logf("CH34x serial init failed");  // serial init
       break;
     }
     case CP210X:
@@ -475,6 +494,7 @@ bool activate(int i) {
     default: break;
   }
   if (!applyLine()) logf("line setup (baud/format) failed");
+  else logf("line set: %lu baud, %u data bits", (unsigned long)lBaud, lBits);
   if (!applyModem()) logf("DTR/RTS setup failed");
   flushInput();
   active = i;
@@ -725,13 +745,23 @@ size_t write(const uint8_t *buf, size_t n) {
     outBusy = true;
     if (usb_host_transfer_submit(xOut) != ESP_OK) {
       outBusy = false;
+      statWriteFails++;
       break;
     }
     // If the device does not take the data in time the transfer stays queued; further
     // writes are dropped until it completes (e.g. CDC devices waiting for DTR).
-    if (xSemaphoreTake(outDone, OUT_WAIT) != pdTRUE) break;
-    if (xOut->status != USB_TRANSFER_STATUS_COMPLETED) break;
+    if (xSemaphoreTake(outDone, OUT_WAIT) != pdTRUE) {
+      lastOutStatus = 0xFF;  // still pending
+      statWriteFails++;
+      break;
+    }
+    lastOutStatus = xOut->status;
+    if (xOut->status != USB_TRANSFER_STATUS_COMPLETED) {
+      statWriteFails++;
+      break;
+    }
     done += c;
+    statTx += c;
   }
   return done;
 }
@@ -840,6 +870,11 @@ void report() {
     char l[40];
     label(i, l, sizeof l);
     logf("%c port %d: %s", i == active && ready ? '*' : ' ', i + 1, l);
+  }
+  if (ready) {
+    logf("sent %lu B (fails %u, last st %u)", (unsigned long)statTx, statWriteFails, lastOutStatus);
+    logf("recv %lu B in %lu xfers (last st %u)", (unsigned long)statRx, (unsigned long)statInXfers,
+         lastInStatus);
   }
 }
 

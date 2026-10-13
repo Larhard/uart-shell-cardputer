@@ -636,10 +636,13 @@ static void applyRadioPreset() {
   cfg.eol = EOL_NONE;
   cfg.rawMode = 0;
   cfg.dtr = cfg.rts = 0;
+  // CAT replies start with the command ("FA;" -> "FA00014074000;"), which the echo
+  // filter would mistake for an echo; show everything instead.
+  cfg.localEcho = ECHO_SHOW;
   scan.on = false;
   linkBegin();
   logConfigNote();
-  info("[preset] FX-4CR CAT: USB 115200 8N1, Enter adds nothing");
+  info("[preset] FX-4CR CAT: USB 115200 8N1, Enter adds nothing, echo shows all");
   info("try FA; (freq) IF; (status) ID; (model)");
 }
 
